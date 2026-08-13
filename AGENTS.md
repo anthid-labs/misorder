@@ -140,19 +140,68 @@ this is N language products again.
   file. Reading the scenario would check the configuration that was asked for
   rather than the one the server actually has.
 
-## Open and closed
+## Open core
 
-Open source: the runner, the scenario format, the proxy layer, every adapter,
-the decision recorder, the seeded scheduler, the built-in invariants, trace
-shrinking, local fuzzing, any simulated dependency, the scrubber, the transcript
-format. Cloud: the vendor corpus and drift detection, compliance artifacts, team
-triage and history, distributed seed-search orchestration.
+**This repository is public.** `github.com/misorder/misorder`, Apache-2.0. The
+hosted product is a separate private repository, `github.com/misorder/platform`,
+in the same organisation.
 
-The split is structural: OSS runs on one machine, stateless, results to stdout.
-Do not move anything from the first list into the second, and in particular do
-not paywall shrinking or the virtual clock: a free tier that produces failures
-less useful than the incident they predicted, or that is simply slow, teaches
-people the tool does not work.
+Nothing hosted goes here. Not behind a feature flag, not behind a licence check,
+not as a stub. If a change needs state that outlives one run, a second machine,
+or a network, it belongs in the platform, and what belongs here is the document
+that carries the information across.
+
+**The coupling between the two is file formats and process boundaries, never a
+Rust API.** The platform does not depend on this crate. It reads documents this
+engine writes, writes documents it reads, and runs `mis` as a child process.
+[`docs/INTERFACES.md`](docs/INTERFACES.md) is that contract, and it is the file
+to read before changing any of these:
+
+- the scenario TOML
+- the corpus TOML (`corpus::FORMAT_VERSION`)
+- the trace JSON Lines (`trace::FORMAT_VERSION`)
+- the run and sweep report JSON (`report::run::FORMAT_VERSION`)
+- the CLI surface and its three exit codes
+
+Everything else in this repository is free to be refactored in any release, and
+should be. An open core whose internals have become a compatibility surface
+stops being developed.
+
+The dividing line for a new feature is **stateless and local stays open;
+persistent and shared is hosted.** Grouping failures within one sweep is open,
+because it needs no state and it is what makes local output honest. Tracking
+which pull request introduced a signature is hosted, because it needs a
+database.
+
+Open, permanently: the runner, the scenario format, the proxy layer, every
+adapter, the decision recorder, the seeded scheduler, the built-in invariants,
+trace shrinking, local fuzzing, any simulated dependency, the virtual clock, the
+scrubber, the transcript format.
+
+Three of those are specifically not moveable. Paywalling an **adapter** ends the
+community contribution that is the only way the long tail of vendors is ever
+covered. Paywalling **shrinking** makes the free tier produce failures less
+useful than the incident they predicted. Paywalling the **virtual clock** makes
+the free tier slow, and everyone concludes the tool is slow.
+
+## The engine never phones home
+
+No network client, no account, no credentials, no telemetry, no licence check,
+no usage counter. The only sockets this process opens are the Docker daemon, the
+dependencies it started, and the service under test.
+
+This is a sales requirement, not a preference. Buyers in this segment treat
+silent collection of anything resembling production traffic as a compliance
+incident rather than a PR problem, and one security review that finds an
+unexpected outbound connection ends the conversation permanently. The claim
+survives only if it stays literally true, so it is checkable by reading this
+repository.
+
+It also follows from the pricing. Charging per service under test or per
+integration monitored, rather than per compute, means there is nothing to meter:
+a seed-hour meter would make someone cap the nightly sweep at 10k, the bug that
+needed seed 71830 would never surface, and they would churn saying it never
+found anything.
 
 ## Verification
 

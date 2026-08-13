@@ -18,6 +18,9 @@ use crate::invariant::{CheckContext, Checker, Violation};
 use crate::orchestrator::Environment;
 use crate::proxy::EventSink;
 use crate::report::Reproducer;
+use crate::report::run::{
+    self, Decisions, Engine, Faults, RunReport, ScenarioRef, ShardRef, SweepReport, Verdict,
+};
 use crate::scenario::file::Resolved;
 use crate::schedule::{Profile, Scheduler};
 use crate::shrink::{self, Oracle};
@@ -39,6 +42,110 @@ impl Run {
             Run::Seed(seed) => *seed,
             Run::Replay(trace) => trace.seed,
         }
+    }
+}
+
+/// A contiguous span of seeds.
+///
+/// Stated as start and count rather than passed as an iterator, because a sweep
+/// has to be able to say afterwards what it was asked to cover. "Seeds 0 to
+/// 10000" must mean the same set next week, and a report that could only say
+/// "some seeds" is not evidence of anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Seeds {
+    pub start: u64,
+    pub count: u64,
+}
+
+impl Seeds {
+    pub fn new(start: u64, count: u64) -> Self {
+        Self { start, count }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = u64> + use<> {
+        let start = self.start;
+
+        (0..self.count).map(move |offset| start.saturating_add(offset))
+    }
+}
+
+/// One slice of a seed space, for splitting a sweep across machines.
+///
+/// Selection is `seed % count == index`, not a contiguous range, and the
+/// difference matters. Contiguous ranges give every machine a block that may be
+/// entirely uninteresting or entirely failing, so one worker finishes in a
+/// second and another runs for an hour. Modulo spreads the work, and it needs
+/// no coordination: a machine can compute its own slice from two integers with
+/// nothing to ask anybody.
+///
+/// That is the whole seam for running a sweep across many machines. Deciding
+/// *how many* machines, starting them, collecting their reports and merging
+/// them is orchestration, and orchestration is not something a stateless CLI
+/// should grow. What the CLI owes an orchestrator is the ability to be told
+/// "you are 7 of 64" and to do exactly that, offline, and say so in its report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shard {
+    index: u64,
+    count: u64,
+}
+
+impl Shard {
+    pub fn new(index: u64, count: u64) -> Result<Self> {
+        if count == 0 {
+            return Err(Error::Scenario(
+                "a shard count of 0 runs nothing".to_string(),
+            ));
+        }
+
+        if index >= count {
+            return Err(Error::Scenario(format!(
+                "shard {index} of {count} does not exist; shards are numbered 0 to {}",
+                count - 1
+            )));
+        }
+
+        Ok(Self { index, count })
+    }
+
+    /// Parses `7/64`.
+    pub fn parse(text: &str) -> Result<Self> {
+        let (index, count) = text.split_once('/').ok_or_else(|| {
+            Error::Scenario(format!("`{text}` is not a shard; write it as `7/64`"))
+        })?;
+
+        let parse = |value: &str, what: &str| -> Result<u64> {
+            value
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| Error::Scenario(format!("shard {what} `{value}` is not a number")))
+        };
+
+        Shard::new(parse(index, "index")?, parse(count, "count")?)
+    }
+
+    pub fn index(&self) -> u64 {
+        self.index
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn contains(&self, seed: u64) -> bool {
+        seed % self.count == self.index
+    }
+
+    fn as_ref(&self) -> ShardRef {
+        ShardRef {
+            index: self.index,
+            count: self.count,
+        }
+    }
+}
+
+impl std::fmt::Display for Shard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.index, self.count)
     }
 }
 
@@ -65,6 +172,12 @@ pub struct Outcome {
     /// tells a reader which of their systems to stop reading.
     pub declared_deps: Vec<String>,
     pub declared_faults: Vec<crate::schedule::FaultKind>,
+
+    /// BLAKE3 of the scenario file, when it came from one.
+    pub scenario_digest: Option<String>,
+
+    /// RFC3339, UTC.
+    pub started_at: String,
 }
 
 impl Outcome {
@@ -79,6 +192,74 @@ impl Outcome {
     /// the consequence would send the reader to the wrong place.
     pub fn failure(&self) -> Option<Reproducer> {
         self.reproducer(self.trace.active_count())
+    }
+
+    /// The machine-readable form.
+    ///
+    /// The one document anything downstream reads. Never [`Verdict::Incomplete`]:
+    /// an `Outcome` exists only for a run that finished, and a run that could
+    /// not start is an `Err` that never becomes one of these.
+    ///
+    /// The signature is only meaningful on a shrunk trace, so it is taken from
+    /// whatever trace this outcome holds and is the caller's job to have shrunk
+    /// first. Signing an unshrunk trace would give every seed its own identity
+    /// and defeat the grouping it exists for.
+    pub fn report(&self) -> RunReport {
+        let violations = self.violations.iter().map(Into::into).collect();
+
+        let used: Vec<crate::schedule::FaultKind> = {
+            let mut used: Vec<_> = self
+                .trace
+                .active()
+                .filter_map(|record| record.decision.fault_kind())
+                .collect();
+            used.sort_unstable();
+            used.dedup();
+            used
+        };
+
+        let mut report = RunReport {
+            format: run::FORMAT_VERSION,
+            engine: Engine::default(),
+            scenario: ScenarioRef {
+                name: self.scenario.clone(),
+                digest: self.scenario_digest.clone(),
+            },
+            seed: self.seed,
+            verdict: if self.passed() {
+                Verdict::Passed
+            } else {
+                Verdict::Violated
+            },
+            signature: (!self.passed()).then(|| self.trace.signature()),
+            violations,
+            decisions: Decisions {
+                recorded: self.trace.records.len(),
+                active: self.trace.active_count(),
+            },
+            faults: Faults {
+                permitted: self.declared_faults.clone(),
+                used,
+            },
+            dependencies: self
+                .declared_deps
+                .iter()
+                .map(|name| crate::report::run::DependencyRecord {
+                    name: name.clone(),
+                    image: None,
+                    digest: None,
+                })
+                .collect(),
+            reproducer: None,
+            started_at: self.started_at.clone(),
+            elapsed_ms: run::millis(self.elapsed),
+        };
+
+        if let Some(reproducer) = self.failure() {
+            run::from_reproducer(&mut report, &reproducer);
+        }
+
+        report
     }
 
     /// The failure, rendered against a stated original decision count.
@@ -102,19 +283,66 @@ impl Outcome {
     }
 }
 
-/// What a fuzzing pass found.
+/// What a sweep of seeds found.
 #[derive(Debug, Clone)]
 pub struct FuzzReport {
     pub scenario: String,
-    pub seeds: usize,
-    /// Failing runs, in the order their seeds were tried.
+    pub scenario_digest: Option<String>,
+    pub shard: Option<Shard>,
+
+    /// What this process was asked for, before sharding.
+    pub seeds: Seeds,
+    /// What it actually ran. Lower than `seeds.count` under sharding.
+    pub seeds_run: u64,
+
+    pub passed: u64,
+    /// Runs that could not complete. Counted separately from passes, because a
+    /// sweep where half the runs never started must not read as a clean one.
+    pub incomplete: u64,
+
+    /// Failing runs, by ascending seed.
     pub failures: Vec<Outcome>,
+
+    pub started_at: String,
     pub elapsed: Duration,
 }
 
 impl FuzzReport {
     pub fn passed(&self) -> bool {
         self.failures.is_empty()
+    }
+
+    /// Whether every seed this process was responsible for actually ran.
+    pub fn is_complete(&self) -> bool {
+        self.incomplete == 0
+    }
+
+    /// The machine-readable form, with failures grouped by signature.
+    ///
+    /// `reports` is passed in rather than derived from `failures`, because the
+    /// useful signature comes from a *shrunk* trace and shrinking happens after
+    /// the sweep. A caller that has not shrunk passes the unshrunk reports and
+    /// gets grouping that is honest about being per-seed.
+    pub fn to_report(&self, reports: Vec<RunReport>) -> SweepReport {
+        SweepReport {
+            format: run::FORMAT_VERSION,
+            engine: Engine::default(),
+            scenario: ScenarioRef {
+                name: self.scenario.clone(),
+                digest: self.scenario_digest.clone(),
+            },
+            shard: self.shard.map(|shard| shard.as_ref()),
+            seed_start: self.seeds.start,
+            seed_count: self.seeds.count,
+            seeds_run: self.seeds_run,
+            passed: self.passed,
+            violated: reports.len() as u64,
+            incomplete: self.incomplete,
+            distinct_failures: SweepReport::group(&reports),
+            failures: reports,
+            started_at: self.started_at.clone(),
+            elapsed_ms: run::millis(self.elapsed),
+        }
     }
 }
 
@@ -151,6 +379,7 @@ impl Runner {
     /// scheduler controls.
     pub async fn execute(&self, run: Run) -> Result<Outcome> {
         let started = Instant::now();
+        let started_at = run::now_rfc3339();
         let cancel = CancellationToken::new();
         let (events, mut receiver) = EventSink::new();
 
@@ -217,6 +446,8 @@ impl Runner {
                 .map(str::to_string)
                 .collect(),
             declared_faults: self.scenario.faults.clone(),
+            scenario_digest: self.scenario.digest.clone(),
+            started_at,
         })
     }
 
@@ -277,12 +508,18 @@ impl Runner {
     /// Runs locally and stateless, results to stdout. Distributed search is the
     /// cloud product, and the split is structural rather than a crippled tier:
     /// nobody resents a free CLI for not containing a job scheduler.
-    pub async fn fuzz(&self, seeds: impl IntoIterator<Item = u64>, parallel: usize) -> FuzzReport {
+    pub async fn fuzz(&self, seeds: Seeds, parallel: usize, shard: Option<Shard>) -> FuzzReport {
         let started = Instant::now();
-        let seeds: Vec<u64> = seeds.into_iter().collect();
+        let started_at = run::now_rfc3339();
+
+        let mine: Vec<u64> = seeds
+            .iter()
+            .filter(|seed| shard.is_none_or(|shard| shard.contains(*seed)))
+            .collect();
+
         let runner = Arc::new(self.clone());
 
-        let outcomes: Vec<_> = futures::stream::iter(seeds.clone())
+        let outcomes: Vec<_> = futures::stream::iter(mine.clone())
             .map(|seed| {
                 let runner = Arc::clone(&runner);
 
@@ -292,27 +529,38 @@ impl Runner {
             .collect()
             .await;
 
-        let mut failures: Vec<Outcome> = outcomes
-            .into_iter()
-            .filter_map(|(seed, result)| match result {
-                Ok(outcome) if !outcome.passed() => Some(outcome),
-                Ok(_) => None,
+        let mut failures = Vec::new();
+        let mut passed = 0;
+        let mut incomplete = 0;
+
+        for (seed, result) in outcomes {
+            match result {
+                Ok(outcome) if outcome.passed() => passed += 1,
+                Ok(outcome) => failures.push(outcome),
                 Err(error) => {
-                    // A harness failure is not a finding. Reported as a warning
-                    // and excluded from the failures, because presenting it as
-                    // a caught bug is how a tool teaches people to ignore it.
+                    // A harness failure is not a finding. Counted apart from
+                    // both passes and failures, because presenting it as a
+                    // caught bug is how a tool teaches people to ignore it, and
+                    // folding it into the passes is how a sweep claims coverage
+                    // it never had.
                     tracing::warn!(seed, %error, "run could not complete");
-                    None
+                    incomplete += 1;
                 }
-            })
-            .collect();
+            }
+        }
 
         failures.sort_by_key(|outcome| outcome.seed);
 
         FuzzReport {
             scenario: self.scenario.name.clone(),
-            seeds: seeds.len(),
+            scenario_digest: self.scenario.digest.clone(),
+            shard,
+            seeds,
+            seeds_run: mine.len() as u64,
+            passed,
+            incomplete,
             failures,
+            started_at,
             elapsed: started.elapsed(),
         }
     }
@@ -385,6 +633,50 @@ builtin = "eventually_quiescent"
     }
 
     #[test]
+    fn a_shard_selects_a_spread_of_seeds_rather_than_a_block() {
+        let shard = Shard::new(7, 64).expect("valid");
+        let mine: Vec<u64> = Seeds::new(0, 640)
+            .iter()
+            .filter(|s| shard.contains(*s))
+            .collect();
+
+        assert_eq!(mine.len(), 10);
+        assert_eq!(mine[0], 7);
+        assert_eq!(mine[1], 71, "spread, so no worker gets an all-quiet block");
+    }
+
+    #[test]
+    fn every_seed_lands_in_exactly_one_shard() {
+        let shards: Vec<Shard> = (0..8).map(|i| Shard::new(i, 8).expect("valid")).collect();
+
+        for seed in 0..500u64 {
+            let owners = shards.iter().filter(|shard| shard.contains(seed)).count();
+
+            assert_eq!(owners, 1, "seed {seed} is owned by {owners} shards");
+        }
+    }
+
+    #[test]
+    fn a_shard_is_written_the_way_it_reads() {
+        assert_eq!(
+            Shard::parse("7/64").expect("parse"),
+            Shard::new(7, 64).expect("valid")
+        );
+        assert_eq!(Shard::parse("7/64").expect("parse").to_string(), "7/64");
+        assert!(Shard::parse("7 of 64").is_err());
+        assert!(Shard::parse("64/64").is_err(), "shards are zero-indexed");
+        assert!(Shard::parse("0/0").is_err());
+    }
+
+    #[test]
+    fn a_seed_span_means_the_same_set_every_time() {
+        assert_eq!(
+            Seeds::new(500, 4).iter().collect::<Vec<_>>(),
+            vec![500, 501, 502, 503]
+        );
+    }
+
+    #[test]
     fn a_replay_run_keeps_the_seed_of_the_trace_it_replays() {
         let trace = Trace::new(8_837_291, "unit");
 
@@ -409,12 +701,18 @@ builtin = "eventually_quiescent"
 
     #[tokio::test]
     async fn a_harness_failure_is_not_counted_as_a_failing_seed() {
-        let report = runner().fuzz([1, 2, 3], 2).await;
+        let report = runner().fuzz(Seeds::new(1, 3), 2, None).await;
 
-        assert_eq!(report.seeds, 3);
+        assert_eq!(report.seeds_run, 3);
+        assert_eq!(report.incomplete, 3);
+        assert_eq!(report.passed, 0);
         assert!(
             report.passed(),
             "a run that could not start is not a caught bug"
+        );
+        assert!(
+            !report.is_complete(),
+            "and the sweep has to say it covered nothing"
         );
     }
 
@@ -437,6 +735,8 @@ builtin = "eventually_quiescent"
             elapsed: Duration::from_secs(1),
             declared_deps: vec!["nats".to_string(), "postgres".to_string()],
             declared_faults: vec![crate::schedule::FaultKind::Reorder],
+            scenario_digest: Some("abc".to_string()),
+            started_at: run::now_rfc3339(),
         };
 
         let rendered = outcome.failure().expect("a violation renders").render();
@@ -462,6 +762,8 @@ builtin = "eventually_quiescent"
             elapsed: Duration::ZERO,
             declared_deps: Vec::new(),
             declared_faults: Vec::new(),
+            scenario_digest: None,
+            started_at: run::now_rfc3339(),
         };
 
         let error = runner()

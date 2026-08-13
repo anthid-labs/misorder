@@ -122,6 +122,29 @@ database = "ledger"
 
 
 # ----------------------------------------------------------------------------
+# Recorded vendor behaviour
+# ----------------------------------------------------------------------------
+#
+# Names of behaviours a real vendor was observed doing, resolved against a
+# corpus: `mis check scenario.toml --corpus ./corpus`.
+#
+# The names mean nothing on their own, and naming one the corpus does not have
+# is an error rather than a silent no-op. A scenario that quietly ran without
+# the behaviour it named would pass and test nothing.
+#
+# A corpus is a directory of <vendor>.toml files. See examples/corpus/ for the
+# format. Your own integrations, checked into your own repository, are a real
+# corpus and need nobody's permission.
+#
+# [vendors.lightspeed]
+# behaviors = [
+#   "no_ack_on_second_replace",
+#   "subscribe_events_does_not_replay",
+#   "sequence_does_not_advance_on_reject",
+# ]
+
+
+# ----------------------------------------------------------------------------
 # Workload
 # ----------------------------------------------------------------------------
 #

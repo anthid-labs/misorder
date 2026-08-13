@@ -1,0 +1,41 @@
+# A scenario that asks for recorded vendor behaviour.
+#
+# The names below mean nothing on their own: they are resolved against a
+# corpus, and naming one the corpus does not have is an error rather than a
+# silent no-op. That matters more than it looks, because a scenario that
+# quietly ran without the behaviour it named would pass and test nothing.
+#
+#   mis check examples/vendor_behaviours.toml --corpus examples/corpus
+#
+# A corpus is just a directory, so a team's own three broker integrations
+# checked into their own repository is a real corpus and needs nobody's
+# permission.
+
+name = "replace_twice_during_partial_fill"
+
+[[system]]
+run = "./target/debug/oms"
+
+[[deps.nats.streams]]
+name = "ORDERS"
+subjects = ["orders.>"]
+max_deliver = 3
+
+[vendors.lightspeed]
+behaviors = [
+  "no_ack_on_second_replace",
+  "sequence_does_not_advance_on_reject",
+]
+
+[[workload]]
+publish = "orders.new"
+payload = { order_id = "ord_1", qty = 100 }
+
+[faults]
+enabled = ["reorder", "delay"]
+
+[[invariants]]
+builtin = "eventually_quiescent"
+
+[[invariants]]
+builtin = "max_deliver_respected"

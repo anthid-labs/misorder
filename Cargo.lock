@@ -1155,6 +1155,7 @@ dependencies = [
  "clap",
  "dotenvy",
  "misorder",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",

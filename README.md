@@ -96,6 +96,21 @@ mis replay trace-8837291.jsonl             # re-run a recorded one
 mis shrink trace-8837291.jsonl -o repro.jsonl
 ```
 
+Results are also available as a versioned JSON document, for anything that wants
+to store, compare or comment on them:
+
+```bash
+mis run scenario.toml --seed 8837291 --format json
+mis fuzz scenario.toml --seeds 10000 --report sweep.json
+```
+
+Large sweeps split across machines with no coordinator. Each one computes its
+own slice from two integers:
+
+```bash
+mis fuzz scenario.toml --seeds 100000 --shard 7/64 --report shard-7.json
+```
+
 Exit codes are the thing CI needs, and they are three-valued on purpose:
 
 | Code | Meaning                                                     |
@@ -261,6 +276,7 @@ That runs in seconds on every pull request and either reproduces or does not.
 | `apps/misorder-cli`  | The `mis` binary: argument parsing, logging setup, exit codes.    |
 | `examples/`          | Scenario files, including the one in this README.                 |
 | `docker/`            | Dockerfile and a compose example.                                 |
+| `docs/INTERFACES.md` | The stable formats anything built on top reads and writes.        |
 | `.github/workflows/` | Lint, test, scan, and publishing.                                 |
 
 The split is along process boundaries. Anything that decides, runs, or checks is
@@ -312,24 +328,39 @@ real container and failing on disagreement.
 **Phase 4, commercial surface.** Vendor drift detection, triage and dedup, a
 shared reproducer library, compliance artifacts, a hosted corpus.
 
-### Open and closed
+### Open core
 
-Open source: the runner, the scenario format, the proxy layer, every adapter,
-the decision recorder, the seeded scheduler, the built-in invariants, trace
-shrinking, local fuzzing, any simulated dependency, the scrubber, the transcript
-format.
+This repository is the engine, and it is complete on its own: it runs, it finds
+bugs, it shrinks them, and it needs no account. There is a hosted product
+alongside it, and the split is structural rather than a crippled tier.
 
-Cloud: the vendor corpus and drift detection, compliance artifacts, team triage
-and history, distributed seed-search orchestration.
+**Open, permanently:** the runner, the scenario format, the proxy layer, every
+adapter, the decision recorder, the seeded scheduler, the built-in invariants,
+trace shrinking, local fuzzing, any simulated dependency, the virtual clock, the
+scrubber, the transcript format.
 
-The split is structural, not a crippled tier. OSS runs on one machine,
-stateless, results to stdout; cloud does orchestration, persistence and
-curation. Nobody resents a free CLI for not containing a distributed job
-scheduler.
+**Hosted:** the curated vendor corpus and drift detection, compliance artifacts,
+cross-run triage and history, distributed seed-search orchestration.
 
-Adapters are never paywalled, because the long tail of vendors is only ever
-covered by people who needed one. Neither is the virtual clock, because an OSS
-tool that is slow teaches everyone that the tool is slow.
+The dividing line is **stateless and local stays open; persistent and shared is
+hosted.** Grouping failures within one sweep is here, because it needs no state
+and it is what makes the local output honest. Tracking which pull request
+introduced a failure needs a database, and a stateless CLI should not grow one.
+
+Three things are specifically never paywalled. **Adapters**, because the long
+tail of vendors is only ever covered by people who needed one, and a licence
+boundary there ends those contributions. **Shrinking**, because withholding it
+would make the free tier produce failures less useful than the incident they
+predicted. **The virtual clock**, because an open source tool that is slow
+teaches everyone that the tool is slow.
+
+The engine has no network client, no account, no telemetry, and no usage
+counter. The only sockets it opens are the Docker daemon, the dependencies it
+starts, and your service. That is checkable by reading this repository, and it
+is meant to be.
+
+[`docs/INTERFACES.md`](docs/INTERFACES.md) documents the formats anything built
+on top reads and writes.
 
 ## Not done
 

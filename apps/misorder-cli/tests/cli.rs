@@ -201,3 +201,162 @@ fn version_and_help_work_without_a_scenario() {
     assert!(mis(&["--help"]).status.success());
     assert!(mis(&["fuzz", "--help"]).status.success());
 }
+
+#[test]
+fn a_bad_shard_is_refused_before_anything_starts() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = write_scenario(directory.path(), SCENARIO);
+
+    let output = mis(&[
+        "fuzz",
+        path.to_str().expect("utf-8"),
+        "--shard",
+        "64/64",
+        "--seeds",
+        "4",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("zero-indexed") || stderr(&output).contains("does not exist"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_sweep_report_states_the_shard_and_the_coverage_hole() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = write_scenario(directory.path(), SCENARIO);
+    let report = directory.path().join("sweep.json");
+
+    // No Docker here, so every run is incomplete. That is the case worth
+    // pinning: a sweep that covered nothing must not read as a clean pass.
+    let output = mis(&[
+        "fuzz",
+        path.to_str().expect("utf-8"),
+        "--seeds",
+        "8",
+        "--shard",
+        "1/4",
+        "--report",
+        report.to_str().expect("utf-8"),
+    ]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    let body = std::fs::read_to_string(&report).expect("report written");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+
+    assert_eq!(parsed["shard"]["index"], 1);
+    assert_eq!(parsed["shard"]["count"], 4);
+    assert_eq!(parsed["seed_count"], 8);
+    assert_eq!(parsed["seeds_run"], 2, "one seed in four, twice over");
+    assert_eq!(parsed["incomplete"], 2);
+    assert_eq!(parsed["passed"], 0);
+    assert!(
+        parsed["engine"]["version"].is_string(),
+        "a result outlives the binary, so it has to say which one made it"
+    );
+    assert!(
+        parsed["scenario"]["digest"].is_string(),
+        "and which scenario it attests to"
+    );
+}
+
+#[test]
+fn a_sweep_report_streams_to_stdout_with_the_logs_out_of_the_way() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = write_scenario(directory.path(), SCENARIO);
+
+    let output = Command::new(MIS)
+        .args([
+            "fuzz",
+            path.to_str().expect("utf-8"),
+            "--seeds",
+            "2",
+            "--report",
+            "-",
+        ])
+        .env("LOG_LEVEL", "debug")
+        .output()
+        .expect("the mis binary runs");
+
+    serde_json::from_str::<serde_json::Value>(&stdout(&output))
+        .expect("stdout is the document and nothing else");
+}
+
+#[test]
+fn a_scenario_naming_a_vendor_needs_a_corpus() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = write_scenario(
+        directory.path(),
+        r#"
+name = "vendor"
+
+[[system]]
+run = "./service"
+
+[vendors.lightspeed]
+behaviors = ["no_ack_on_second_replace"]
+
+[[invariants]]
+builtin = "eventually_quiescent"
+"#,
+    );
+
+    let output = mis(&["check", path.to_str().expect("utf-8")]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("--corpus"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_behaviour_the_corpus_does_not_have_is_refused_and_lists_what_it_does() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let corpus = directory.path().join("corpus");
+    std::fs::create_dir(&corpus).expect("mkdir");
+    std::fs::write(
+        corpus.join("lightspeed.toml"),
+        r#"
+vendor = "lightspeed"
+
+[[behaviors]]
+name = "no_ack_on_second_replace"
+protocol = "fix"
+describe = "A second replace gets no execution report."
+provenance = { kind = "documented", url = "https://example.invalid" }
+"#,
+    )
+    .expect("write corpus");
+
+    let path = write_scenario(
+        directory.path(),
+        r#"
+name = "vendor"
+
+[[system]]
+run = "./service"
+
+[vendors.lightspeed]
+behaviors = ["a_behaviour_nobody_recorded"]
+
+[[invariants]]
+builtin = "eventually_quiescent"
+"#,
+    );
+
+    let output = mis(&[
+        "check",
+        path.to_str().expect("utf-8"),
+        "--corpus",
+        corpus.to_str().expect("utf-8"),
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("no_ack_on_second_replace"),
+        "the message should say what the vendor does have: {}",
+        stderr(&output)
+    );
+}

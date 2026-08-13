@@ -140,7 +140,10 @@ impl VendorBehaviors {
     }
 
     pub fn names(&self) -> Vec<&str> {
-        self.behaviors.iter().map(|flag| flag.name.as_str()).collect()
+        self.behaviors
+            .iter()
+            .map(|flag| flag.name.as_str())
+            .collect()
     }
 }
 
@@ -246,13 +249,19 @@ impl LocalCorpus {
     /// Every vendor this directory has a file for, in a stable order.
     pub fn vendors(&self) -> Result<Vec<String>> {
         let entries = std::fs::read_dir(&self.root).map_err(|error| {
-            Error::Scenario(format!("cannot read corpus {}: {error}", self.root.display()))
+            Error::Scenario(format!(
+                "cannot read corpus {}: {error}",
+                self.root.display()
+            ))
         })?;
 
         let mut vendors: Vec<String> = entries
             .filter_map(std::result::Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "toml"))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "toml")
+            })
             .filter_map(|path| {
                 path.file_stem()
                     .and_then(|stem| stem.to_str())
@@ -426,7 +435,9 @@ provenance = { kind = "documented", url = "https://example.invalid/changelog" }
     async fn naming_a_vendor_with_no_corpus_says_to_pass_one() {
         let requested = BTreeMap::from([("lightspeed".to_string(), vec!["anything".to_string()])]);
 
-        let error = resolve(&EmptyCorpus, &requested).await.expect_err("no corpus");
+        let error = resolve(&EmptyCorpus, &requested)
+            .await
+            .expect_err("no corpus");
 
         assert!(error.to_string().contains("--corpus"), "got {error}");
     }

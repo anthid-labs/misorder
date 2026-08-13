@@ -4,6 +4,10 @@
 //! handed back the incident it was supposed to explain; one that reports the
 //! six events that caused it has done the work.
 
+pub mod run;
+
+pub use run::{RunReport, SweepReport};
+
 use std::time::Duration;
 
 use crate::event::Observed;
@@ -204,21 +208,34 @@ fn capitalise(text: &str) -> String {
 /// sequence, and that is the difference between a tool a team keeps and a
 /// research toy they delete after the demo.
 pub mod junit {
-    use super::Reproducer;
     use std::time::Duration;
 
     /// One scenario run.
-    #[derive(Debug, Clone)]
+    ///
+    /// Takes rendered text rather than a [`Reproducer`](super::Reproducer), so
+    /// the XML carries exactly what the user saw on their terminal and this
+    /// module never has to be kept in step with how a reproducer is worded.
+    #[derive(Debug, Clone, Default)]
     pub struct Case {
         pub name: String,
         pub elapsed: Duration,
-        /// `None` for a pass.
-        pub failure: Option<Reproducer>,
+
+        /// One line, for the failure element's `message`. `None` for a pass.
+        pub message: Option<String>,
+
+        /// The full reproducer, for the failure element's body.
+        pub body: Option<String>,
+    }
+
+    impl Case {
+        pub fn failed(&self) -> bool {
+            self.message.is_some() || self.body.is_some()
+        }
     }
 
     /// Renders a JUnit report.
     pub fn render(suite: &str, cases: &[Case]) -> String {
-        let failures = cases.iter().filter(|case| case.failure.is_some()).count();
+        let failures = cases.iter().filter(|case| case.failed()).count();
         let total: f64 = cases.iter().map(|case| case.elapsed.as_secs_f64()).sum();
 
         let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -241,17 +258,16 @@ pub mod junit {
                 case.elapsed.as_secs_f64()
             ));
 
-            match &case.failure {
-                None => out.push_str("/>\n"),
-                Some(reproducer) => {
-                    out.push_str(">\n");
-                    out.push_str(&format!(
-                        "      <failure message=\"{}\">{}</failure>\n",
-                        escape(&reproducer.violation.to_string()),
-                        escape(&reproducer.render())
-                    ));
-                    out.push_str("    </testcase>\n");
-                }
+            if case.failed() {
+                out.push_str(">\n");
+                out.push_str(&format!(
+                    "      <failure message=\"{}\">{}</failure>\n",
+                    escape(case.message.as_deref().unwrap_or("invariant violated")),
+                    escape(case.body.as_deref().unwrap_or_default())
+                ));
+                out.push_str("    </testcase>\n");
+            } else {
+                out.push_str("/>\n");
             }
         }
 
@@ -290,7 +306,7 @@ pub mod junit {
                 &[Case {
                     name: "seed-8837291".to_string(),
                     elapsed: Duration::from_millis(1200),
-                    failure: None,
+                    ..Case::default()
                 }],
             );
 
@@ -307,7 +323,8 @@ pub mod junit {
                 &[Case {
                     name: "seed-1".to_string(),
                     elapsed: Duration::from_secs(1),
-                    failure: Some(reproducer),
+                    message: Some(reproducer.violation.to_string()),
+                    body: Some(reproducer.render()),
                 }],
             );
 

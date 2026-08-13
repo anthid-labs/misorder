@@ -43,3 +43,6 @@ chrono = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
+# The report document is a published interface, so the tests read it the way a
+# consumer would: as JSON, with no help from the types that produced it.
+serde_json = { workspace = true }

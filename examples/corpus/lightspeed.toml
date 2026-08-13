@@ -1,0 +1,37 @@
+# An example corpus entry.
+#
+# A corpus is a directory of <vendor>.toml files. Point any command at one with
+# `--corpus <directory>` or `MISORDER_CORPUS`.
+#
+# This file is illustrative: the behaviours below are made up, and the URLs do
+# not resolve. A real entry is derived from a recorded session, which is the
+# only way to learn what a vendor can actually emit. Documentation, OpenAPI
+# specs and schemas are precisely the artifacts that were wrong in the first
+# place.
+
+vendor = "lightspeed"
+
+[[behaviors]]
+name = "no_ack_on_second_replace"
+protocol = "fix"
+describe = "A second replace on one order gets no execution report, so a client waiting on one waits forever."
+# Recorded: observed on the wire. The strongest claim, and the only one that
+# cannot be got by reading. The digest is what makes the entry verifiable
+# rather than asserted.
+provenance = { kind = "recorded", transcript = "ls-2026-03-11-a", digest = "b7c1f0a2d4e6" }
+
+[[behaviors]]
+name = "sequence_does_not_advance_on_reject"
+protocol = "fix"
+describe = "A rejected order leaves the sequence number where it was, so a client that assumed it advanced resends under a number the server already used."
+# Documented: the vendor said so. Weaker than a recording, and worth having,
+# because it dates the change.
+provenance = { kind = "documented", url = "https://example.invalid/lightspeed/changelog#2026-02" }
+
+[[behaviors]]
+name = "subscribe_events_does_not_replay"
+protocol = "http"
+describe = "Subscribing to the event stream delivers only what happens next, so anything between the snapshot and the subscribe is lost."
+# Reported: someone else hit it. The weakest claim, and often the first sign of
+# a real one.
+provenance = { kind = "reported", url = "https://example.invalid/lightspeed-sdk/issues/412" }
