@@ -1,0 +1,21 @@
+# Rust build artifacts
+target/
+**/target/
+
+# Cargo / build noise
+**/*.rs.bk
+
+# Git
+.git
+.gitignore
+
+# OS junk
+.DS_Store
+
+# Logs
+*.log
+
+# Recorded runs. A trace is an output, and the image should never carry one
+# from whoever built it.
+traces/
+*.jsonl

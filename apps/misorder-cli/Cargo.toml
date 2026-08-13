@@ -1,0 +1,45 @@
+[package]
+name = "misorder-cli"
+description = "Command line interface for misorder: run, fuzz, replay and shrink deterministic simulation scenarios."
+keywords = ["testing", "deterministic", "chaos", "simulation", "cli"]
+categories = ["command-line-utilities", "development-tools::testing"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+# The package is `misorder-cli` so it can be published alongside the `misorder`
+# library, but the command it installs is `mis`. That is the name in every
+# example and in every CI config, and it is short because it is typed dozens of
+# times a day during a debugging session.
+[[bin]]
+name = "mis"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = ["nats", "postgres", "http"]
+nats = ["misorder/nats"]
+postgres = ["misorder/postgres"]
+http = ["misorder/http"]
+
+[dependencies]
+misorder = { workspace = true, default-features = false }
+
+clap = { workspace = true }
+dotenvy = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }

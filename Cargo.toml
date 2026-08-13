@@ -1,0 +1,117 @@
+[workspace]
+resolver = "3"
+
+# Members are globbed: dropping a crate into apps/ or crates/ picks it up with
+# no edit here. The glob's parent directory has to exist, since cargo treats an
+# unmatched glob as a literal path and fails to read it.
+members = [
+    "apps/*",
+    "crates/*",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/misorder/misorder"
+homepage = "https://github.com/misorder/misorder"
+authors = ["Dallin Wright <dallinwright@anthid.com>"]
+# Stated rather than inferred, so a build on an older toolchain fails with the
+# version it needs instead of an error inside a dependency. Edition 2024 puts
+# the floor at 1.85 and nothing in the tree currently raises it. `cargo clippy`
+# enforces this, so it cannot drift from what the code uses.
+rust-version = "1.85"
+
+[profile.release]
+opt-level = 3
+
+# Fuzzing spends its time in the scheduler and the proxies, not in the harness's
+# own bookkeeping, but a debug build of `zstd`-style inner loops is still slow
+# enough to distort what a run costs. Optimise dependencies even in dev so a
+# local `mis fuzz` measures the code under test rather than the debug harness.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 0
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(coverage)',
+    'cfg(coverage_nightly)',
+] }
+
+[workspace.dependencies]
+# Local crates. Add one line per crate created under crates/, then depend on
+# it from an app with `<name> = { workspace = true }`.
+#
+# `version` alongside `path` is what makes publishing work: cargo builds against
+# the path locally and rewrites the dependency to the version on crates.io when
+# it packages. Without it, `cargo publish` refuses the crate.
+#
+# Keep `version` in step with `[workspace.package]` above on every bump. Cargo
+# cannot inherit it here, and a stale value is not a build error: `0.1.0` reads
+# as `^0.1.0`, so a published `misorder-cli 0.1.1` would happily resolve against
+# the older `misorder 0.1.0` on crates.io rather than the library it shipped
+# with.
+misorder = { path = "crates/misorder", version = "0.1.0" }
+
+# Async runtime
+tokio = { version = "1.53", features = ["full"] }
+tokio-util = { version = "0.7" }
+futures = "0.3"
+async-trait = "0.1"
+
+# Determinism.
+#
+# ChaCha8 and not `rand::rngs::StdRng`. StdRng's algorithm is explicitly not
+# stable across `rand` releases, so a minor version bump would silently renumber
+# every seed and invalidate every committed reproducer in every user's repo.
+# A named, versioned stream cipher is the whole contract: seed 8837291 has to
+# mean the same schedule in a year.
+rand = { version = "0.10", default-features = false, features = ["std"] }
+rand_chacha = "0.10"
+
+# Container orchestration.
+#
+# bollard is an HTTP client for the Docker daemon's own API, not a per-language
+# testing SDK, so it does not compromise the "no SDK per language" stance: that
+# stance is about what the *service under test* has to import, and the service
+# imports nothing. Nothing here is exposed in misorder's public API, so it can
+# be replaced with a hand-rolled socket client without a breaking change.
+bollard = "0.21"
+
+# Protocol clients.
+#
+# Used to *drive* a scenario and to *check* it, never to proxy one. The proxies
+# in `proxy` speak the wire format themselves, because a client library hides
+# exactly the frame-level decisions the whole tool exists to control.
+async-nats = "0.50"
+tokio-postgres = "0.7"
+
+# Frame buffers for the proxy adapters.
+bytes = "1.12"
+
+# CLI and configuration
+clap = { version = "4.6", features = ["derive", "env"] }
+dotenvy = "0.15"
+
+# Serialization. TOML in, JSON Lines out: a scenario is written by hand and a
+# trace is written by the machine, and those want different formats.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+humantime-serde = "1.1"
+
+# Errors
+thiserror = "2"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Telemetry
+tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std", "ansi"] }
+
+# Test-only
+tempfile = "3.27"

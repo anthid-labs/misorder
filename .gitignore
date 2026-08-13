@@ -1,31 +1,40 @@
+# Rust
 /target
-.idea
+**/target
+**/*.rs.bk
+
+# Environment / secrets
 .env
-.env.dev
-.env.prod
-.env.list
-venv
-**/venv
-**/__pycache__
-**/*.tgz
-**/.venv
-**/.terraform*
-**/node_modules
+.env.*
+.envrc
 *.key
-# Private keys. `*.key` above misses PEM-encoded ones — the MCP registry
-# publishing key is written as key.pem by the openssl genpkey flow in the
-# registry's DNS-auth guide, and lands in whatever directory you ran it from.
 *.pem
-**/node_modules/
-**/.idea
-**/package-lock.json
-**/.vite
-.codex
-**/.codex
 **/secrets.tfvars
 **/secrets.*.tfvars
-**/secrets.aws.tfvars
-.envrc
-.pnpm-store/
-notes/db_secrets.txt
-**/dist
+
+# Python tooling
+venv
+**/venv
+**/.venv
+**/__pycache__
+
+# Editors / agents
+.idea
+**/.idea
+.vscode
+.codex
+**/.codex
+.claude/settings.local.json
+
+# OS
+.DS_Store
+
+# Run output. Traces are reproducible from a seed, so an unshrunk one is noise;
+# a *shrunk* one is a committed reproducer and belongs in the repository. Keep
+# those under tests/reproducers/, which is deliberately not ignored here.
+/traces
+*.trace.jsonl
+junit.xml
+
+# Local scenario, in the way `treesync.toml` is local. The example is committed.
+misorder.toml
