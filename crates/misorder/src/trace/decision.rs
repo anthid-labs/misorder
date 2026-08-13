@@ -171,6 +171,23 @@ impl Decision {
 }
 
 impl Decision {
+    /// Which kind of decision this is, ignoring its parameters.
+    ///
+    /// What a failure signature is built from. A 40ms delay and a 90ms delay
+    /// are the same bug, so the amount is not part of the identity, and a
+    /// signature that included it would report one bug as hundreds.
+    pub fn discriminant(&self) -> &'static str {
+        match self {
+            Decision::Deliver { delay } if delay.is_zero() => "allow",
+            Decision::Deliver { .. } => "delay",
+            Decision::Drop => "drop",
+            Decision::Reorder { .. } => "reorder",
+            Decision::CloseConnection => "close",
+            Decision::Corrupt { .. } => "corrupt",
+            Decision::Hold { .. } => "hold",
+        }
+    }
+
     /// This decision as a phrase, given what it was applied to.
     ///
     /// The reproducer is the product, so its lines have to read as English at

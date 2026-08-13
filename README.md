@@ -7,6 +7,11 @@ failure decision from a seeded PRNG, and explores thousands of orderings of the
 same scenario. When one breaks you, it shrinks the failure to the six events
 that caused it.
 
+The power of misorder is that it can find bugs that your tests never could;
+instead of a single or small suite of custom integration tests or synthetics, 
+we test tens of thousands of variants and
+combinations for the weak points unknown until a production outage.
+
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **Status: skeleton. The seams work, the protocol adapters do not yet.** What is

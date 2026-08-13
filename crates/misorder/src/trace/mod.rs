@@ -197,6 +197,66 @@ impl Trace {
         Ok(())
     }
 
+    /// A stable identifier for the *shape* of this failure.
+    ///
+    /// Two runs that found the same bug produce the same signature; two runs
+    /// that found different bugs do not. That is the whole contract, and it is
+    /// what makes "ten failing seeds are usually two bugs" a computable
+    /// statement rather than an observation.
+    ///
+    /// What is deliberately excluded, because it varies between two instances
+    /// of one bug:
+    ///
+    /// - **Timestamps.** Wall-clock elapsed differs every run.
+    /// - **Details.** Order ids and subjects carry the run's data, not its
+    ///   shape. A signature that changed with an order id would never match
+    ///   twice.
+    /// - **Ordinals.** Dropping the third ack and dropping the fifth is the
+    ///   same bug found two ways.
+    /// - **Decision parameters.** A 40ms delay and a 90ms delay are one
+    ///   failure, so only which *kind* of decision was taken counts.
+    /// - **Connection numbering.** Connections are renumbered in order of first
+    ///   appearance, so the same interleaving on conn 2 and conn 5 as on conn 1
+    ///   and conn 2 signs identically.
+    ///
+    /// Computed on a *shrunk* trace. An unshrunk one signs its 847 incidental
+    /// decisions along with the six that mattered, so two runs of the same bug
+    /// would never agree.
+    ///
+    /// Grouping signatures into bugs, tracking them over time, and telling a
+    /// team which pull request introduced one are hosted concerns. This is the
+    /// key they are keyed on, and it is computed here so a local user gets the
+    /// same identity without an account.
+    pub fn signature(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+
+        hasher.update(b"misorder-trace-signature-v1\0");
+        hasher.update(self.scenario.as_bytes());
+        hasher.update(b"\0");
+
+        // Renumbered in order of first appearance, so which connection happened
+        // to be accepted first does not change the identity of the failure.
+        let mut canonical: Vec<u64> = Vec::new();
+
+        for record in self.active() {
+            let raw = record.point.key.connection;
+            let index = match canonical.iter().position(|seen| *seen == raw) {
+                Some(index) => index,
+                None => {
+                    canonical.push(raw);
+                    canonical.len() - 1
+                }
+            };
+
+            hasher.update(&(index as u64).to_le_bytes());
+            hasher.update(record.point.key.kind.as_str().as_bytes());
+            hasher.update(record.decision.discriminant().as_bytes());
+            hasher.update(b"\0");
+        }
+
+        hasher.finalize().to_hex()[..16].to_string()
+    }
+
     /// The same trace with the decisions at `keys` replaced by
     /// [`Decision::NEUTRAL`].
     ///
@@ -373,5 +433,140 @@ mod tests {
             trace.records.iter().map(|r| r.seq).collect::<Vec<_>>(),
             vec![0, 1]
         );
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+    use crate::event::ConnectionId;
+
+    fn trace_of(scenario: &str, decisions: &[(u64, PointKind, u64, Decision)]) -> Trace {
+        let mut trace = Trace::new(1, scenario);
+
+        for (seq, (connection, kind, ordinal, decision)) in decisions.iter().enumerate() {
+            trace.records.push(Record {
+                seq: seq as u64,
+                at: Duration::from_millis(seq as u64 * 13),
+                point: DecisionPoint::new(*kind, ConnectionId(*connection), *ordinal)
+                    .with_detail(format!("order-{seq}")),
+                decision: *decision,
+            });
+        }
+
+        trace
+    }
+
+    #[test]
+    fn the_same_failure_shape_signs_identically() {
+        let one = trace_of(
+            "s",
+            &[
+                (1, PointKind::Ack, 0, Decision::Drop),
+                (1, PointKind::Deliver, 4, Decision::CloseConnection),
+            ],
+        );
+
+        // Different ordinals, different connection numbers, different details,
+        // different timestamps. Same bug.
+        let two = trace_of(
+            "s",
+            &[
+                (7, PointKind::Ack, 91, Decision::Drop),
+                (7, PointKind::Deliver, 92, Decision::CloseConnection),
+            ],
+        );
+
+        assert_eq!(one.signature(), two.signature());
+    }
+
+    #[test]
+    fn a_delay_of_a_different_length_is_the_same_failure() {
+        let short = trace_of(
+            "s",
+            &[(
+                1,
+                PointKind::Deliver,
+                0,
+                Decision::Deliver {
+                    delay: Duration::from_millis(40),
+                },
+            )],
+        );
+        let long = trace_of(
+            "s",
+            &[(
+                1,
+                PointKind::Deliver,
+                0,
+                Decision::Deliver {
+                    delay: Duration::from_millis(900),
+                },
+            )],
+        );
+
+        assert_eq!(short.signature(), long.signature());
+    }
+
+    #[test]
+    fn a_different_sequence_of_decisions_is_a_different_failure() {
+        let dropped = trace_of("s", &[(1, PointKind::Ack, 0, Decision::Drop)]);
+        let closed = trace_of("s", &[(1, PointKind::Ack, 0, Decision::CloseConnection)]);
+
+        assert_ne!(dropped.signature(), closed.signature());
+    }
+
+    #[test]
+    fn the_same_shape_in_a_different_scenario_is_a_different_failure() {
+        let ledger = trace_of("ledger", &[(1, PointKind::Ack, 0, Decision::Drop)]);
+        let billing = trace_of("billing", &[(1, PointKind::Ack, 0, Decision::Drop)]);
+
+        assert_ne!(ledger.signature(), billing.signature());
+    }
+
+    #[test]
+    fn interleaving_across_connections_is_part_of_the_shape() {
+        let together = trace_of(
+            "s",
+            &[
+                (1, PointKind::Ack, 0, Decision::Drop),
+                (1, PointKind::Ack, 1, Decision::Drop),
+            ],
+        );
+        let apart = trace_of(
+            "s",
+            &[
+                (1, PointKind::Ack, 0, Decision::Drop),
+                (2, PointKind::Ack, 0, Decision::Drop),
+            ],
+        );
+
+        assert_ne!(
+            together.signature(),
+            apart.signature(),
+            "two acks on one connection is not the same failure as one ack on each"
+        );
+    }
+
+    #[test]
+    fn neutral_decisions_do_not_participate() {
+        let bare = trace_of("s", &[(1, PointKind::Ack, 0, Decision::Drop)]);
+
+        let mut padded = bare.clone();
+        padded.records.push(Record {
+            seq: 9,
+            at: Duration::from_millis(500),
+            point: DecisionPoint::new(PointKind::Deliver, ConnectionId(3), 0),
+            decision: Decision::NEUTRAL,
+        });
+
+        assert_eq!(bare.signature(), padded.signature());
+    }
+
+    #[test]
+    fn a_signature_is_short_enough_to_read_aloud() {
+        let trace = trace_of("s", &[(1, PointKind::Ack, 0, Decision::Drop)]);
+
+        assert_eq!(trace.signature().len(), 16);
     }
 }

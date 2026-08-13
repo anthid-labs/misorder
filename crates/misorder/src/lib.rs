@@ -78,6 +78,7 @@
 //! service adopt this identically, and the cost of supporting both is zero,
 //! because cost scales with protocols and not with languages.
 
+pub mod corpus;
 pub mod error;
 pub mod event;
 pub mod invariant;

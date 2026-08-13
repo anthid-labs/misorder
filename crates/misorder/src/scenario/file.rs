@@ -93,6 +93,32 @@ pub struct Scenario {
 
     #[serde(default)]
     pub run: RunSettings,
+
+    /// Recorded vendor behaviours this scenario wants applied.
+    ///
+    /// Names only. What they mean comes from a
+    /// [`CorpusSource`](crate::corpus::CorpusSource), so a scenario is portable
+    /// between a team's own corpus and any other, and naming a behaviour that
+    /// the corpus in use does not have is an error rather than a silent no-op.
+    #[serde(default)]
+    pub vendors: std::collections::BTreeMap<String, VendorSpec>,
+
+    /// BLAKE3 of the file this was read from, set by [`Scenario::load`].
+    ///
+    /// Not a key: `#[serde(skip)]`, so it cannot be written or forged in the
+    /// file itself. It exists so a result can say which scenario it attests to,
+    /// which is the difference between a report and an assertion when the
+    /// reader is an auditor rather than the person who ran it.
+    #[serde(skip)]
+    pub digest: Option<String>,
+}
+
+/// The behaviours a scenario wants from one vendor.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VendorSpec {
+    #[serde(default)]
+    pub behaviors: Vec<String>,
 }
 
 /// A process to start and proxy.
@@ -486,6 +512,15 @@ impl Default for RunSettings {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolved {
     pub name: String,
+
+    /// BLAKE3 of the scenario file, when it came from one.
+    pub digest: Option<String>,
+
+    /// Vendor to behaviour names, still unresolved: binding them to a corpus
+    /// happens at run time, because the same scenario runs against different
+    /// corpora.
+    pub vendors: std::collections::BTreeMap<String, Vec<String>>,
+
     pub system: Vec<System>,
     pub deps: Deps,
     pub workload: Vec<Step>,
@@ -506,10 +541,19 @@ impl Scenario {
             _ => Error::Io(error),
         })?;
 
-        Self::parse(&text).map_err(|error| match error {
+        let mut scenario = Self::parse(&text).map_err(|error| match error {
             Error::Scenario(message) => Error::Scenario(format!("{}: {message}", path.display())),
             other => other,
-        })
+        })?;
+
+        // Over the bytes on disk, not over the parsed structure. Two files that
+        // parse identically but differ in a comment are different artifacts,
+        // and a comment is exactly where someone records why a value is what it
+        // is. An attestation that ignored that would attest to less than the
+        // reader thinks.
+        scenario.digest = Some(blake3::hash(text.as_bytes()).to_hex()[..32].to_string());
+
+        Ok(scenario)
     }
 
     pub fn parse(text: &str) -> Result<Self> {
@@ -598,6 +642,12 @@ impl Scenario {
 
         Ok(Resolved {
             name: self.name.clone(),
+            digest: self.digest.clone(),
+            vendors: self
+                .vendors
+                .iter()
+                .map(|(vendor, spec)| (vendor.clone(), spec.behaviors.clone()))
+                .collect(),
             system: self.system.clone(),
             deps: self.deps.clone(),
             workload,
@@ -823,6 +873,42 @@ builtin = "eventually_quiescent"
         let error = parse(&text).expect_err("should refuse");
 
         assert!(error.to_string().contains("max_deliver"), "got {error}");
+    }
+
+    #[test]
+    fn a_scenario_names_the_vendor_behaviours_it_wants() {
+        let text = format!(
+            "{MINIMAL}\n[vendors.lightspeed]\nbehaviors = [\"no_ack_on_second_replace\"]\n"
+        );
+
+        let resolved = parse(&text).expect("resolve");
+
+        assert_eq!(
+            resolved.vendors.get("lightspeed").map(Vec::as_slice),
+            Some(["no_ack_on_second_replace".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn a_scenario_parsed_from_a_string_has_no_digest_to_attest_to() {
+        assert!(Scenario::parse(MINIMAL).expect("parse").digest.is_none());
+    }
+
+    #[test]
+    fn loading_a_file_digests_its_bytes_including_comments() {
+        let directory = tempfile::tempdir().expect("tempdir");
+
+        let plain = directory.path().join("plain.toml");
+        let commented = directory.path().join("commented.toml");
+
+        std::fs::write(&plain, MINIMAL).expect("write");
+        std::fs::write(&commented, format!("# why this value\n{MINIMAL}")).expect("write");
+
+        let plain = Scenario::load(&plain).expect("load").digest;
+        let commented = Scenario::load(&commented).expect("load").digest;
+
+        assert!(plain.is_some());
+        assert_ne!(plain, commented, "a comment is part of the artifact");
     }
 
     #[test]

@@ -51,6 +51,9 @@ rand_chacha = { workspace = true }
 bollard = { workspace = true }
 bytes = { workspace = true }
 
+blake3 = { workspace = true }
+chrono = { workspace = true }
+
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

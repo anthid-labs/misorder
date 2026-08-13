@@ -109,6 +109,15 @@ humantime-serde = "1.1"
 # Errors
 thiserror = "2"
 
+# Content addressing.
+#
+# Two things need a stable digest that outlives a build: the shrunk-trace
+# signature that identifies a failure across runs, and the scenario digest that
+# says which file a result attests to. Both are read by things outside this
+# repository, so the algorithm is named and versioned rather than whatever
+# `DefaultHasher` happens to be this release.
+blake3 = "1.8"
+
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
