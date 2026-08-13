@@ -1,0 +1,31 @@
+/target
+.idea
+.env
+.env.dev
+.env.prod
+.env.list
+venv
+**/venv
+**/__pycache__
+**/*.tgz
+**/.venv
+**/.terraform*
+**/node_modules
+*.key
+# Private keys. `*.key` above misses PEM-encoded ones — the MCP registry
+# publishing key is written as key.pem by the openssl genpkey flow in the
+# registry's DNS-auth guide, and lands in whatever directory you ran it from.
+*.pem
+**/node_modules/
+**/.idea
+**/package-lock.json
+**/.vite
+.codex
+**/.codex
+**/secrets.tfvars
+**/secrets.*.tfvars
+**/secrets.aws.tfvars
+.envrc
+.pnpm-store/
+notes/db_secrets.txt
+**/dist
