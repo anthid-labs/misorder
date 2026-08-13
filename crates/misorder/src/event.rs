@@ -30,18 +30,44 @@ impl std::fmt::Display for ConnectionId {
     }
 }
 
-/// An observation, with when it happened relative to the start of the run.
+/// An observation, with when it happened and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observed {
     /// Since the run started. Wall clock in Phase 1; the virtual clock will
     /// replace the source without changing this type.
     pub at: Duration,
+
+    /// Which proxied connection this came from, or `None` for harness
+    /// lifecycle.
+    ///
+    /// On the wrapper rather than repeated in every variant, because every
+    /// invariant that tracks per-connection state needs it and none of them
+    /// should have to match on the event kind to find it. `no_commit_after_error`
+    /// is meaningless without it: an error on one connection says nothing about
+    /// a commit on another, and conflating the two would report a violation
+    /// every time a pool had two connections.
+    pub connection: Option<ConnectionId>,
+
     pub event: Event,
 }
 
 impl Observed {
+    /// A harness observation, belonging to no connection.
     pub fn new(at: Duration, event: Event) -> Self {
-        Self { at, event }
+        Self {
+            at,
+            connection: None,
+            event,
+        }
+    }
+
+    /// An observation from a proxied connection.
+    pub fn on(at: Duration, connection: ConnectionId, event: Event) -> Self {
+        Self {
+            at,
+            connection: Some(connection),
+            event,
+        }
     }
 }
 
@@ -173,9 +199,13 @@ pub enum HttpEvent {
 /// The harness, rather than any dependency.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Lifecycle {
-    SystemStarted { command: String },
+    SystemStarted {
+        command: String,
+    },
     SystemReady,
-    SystemExited { code: Option<i32> },
+    SystemExited {
+        code: Option<i32>,
+    },
     WorkloadComplete,
     /// Nothing in flight and nothing scheduled.
     ///

@@ -1,0 +1,43 @@
+# The dead letter loop.
+#
+# A consumer filtered on "ledger.>" receives "ledger.dead_letter", fails it
+# again, and dead-letters it again. Every piece is behaving correctly, and
+# max_deliver does not stop it, because each republish is a new message with a
+# fresh delivery count.
+#
+# No vendor is involved in this one. It is a service's own consumer filter
+# matching its own dead-letter subject, which is worth noticing: not every
+# ordering bug comes from someone else's system.
+#
+#   mis run examples/dead_letter_no_redelivery.toml --seed 8837291
+
+name = "dead_letter_no_redelivery"
+
+[[system]]
+run = "./target/debug/ledger"
+ready_when = "nats_subscription_active"
+
+[[deps.nats.streams]]
+name = "LEDGER"
+subjects = ["ledger.>"]
+max_deliver = 5
+ack_wait = "30s"
+discard = "old"
+
+[deps.postgres]
+migrations = "./migrations"
+
+[[workload]]
+publish = "ledger.org.org_1.account.acct_1.order"
+payload = { order_id = "ord_1", kind = "fill", qty = 100 }
+
+[faults]
+enabled = ["ack_timeout", "redelivery", "connection_drop", "reorder"]
+
+[[invariants]]
+builtin = "no_infinite_redelivery"
+window = "5m"
+same_payload_max = 10
+
+[[invariants]]
+builtin = "consumer_filter_excludes_dead_letter"

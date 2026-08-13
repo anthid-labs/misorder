@@ -1,0 +1,283 @@
+# A misorder scenario, with every key documented.
+#
+# This is the only artifact you write. There is no SDK, no import, and no build
+# flag: your service connects to the address misorder gives it and behaves
+# normally, which is why a Go service and a Rust service adopt this identically.
+#
+# Unknown keys are a startup error rather than a silently ignored setting. The
+# failure that prevents is specific: a scenario that quietly permits no faults
+# passes 10,000 seeds and reports that your service is fine.
+#
+# Run `mis check scenario.toml` to see what this resolves to and, more usefully,
+# what it will actually check.
+
+# Names this scenario in traces, reports and CI output. Keep it stable: it is
+# what a committed reproducer is filed under.
+name = "dead_letter_no_redelivery"
+
+
+# ----------------------------------------------------------------------------
+# The service under test
+# ----------------------------------------------------------------------------
+
+# One block per process. A list rather than a single value because the failures
+# worth finding in a distributed system need at least two participants.
+[[system]]
+# The command line, as you would type it.
+run = "./target/debug/ledger"
+
+# How misorder knows the service is ready for work.
+#
+#   first_connection          the first connection through any proxy. The
+#                             default, and right for most services: a process
+#                             that has connected to its database is up.
+#   nats_subscription_active  a SUB has crossed the proxy.
+#   postgres_connected        a Postgres startup message has been answered.
+#   immediate                 assume ready. For a service whose first act is to
+#                             receive.
+#
+# Driving the workload before the service is listening produces a failure that
+# is entirely the harness's fault, and one false failure costs more trust than
+# several missed bugs.
+ready_when = "nats_subscription_active"
+
+# Working directory. Relative paths in `run` resolve against it.
+cwd = "."
+
+# Extra environment for the service.
+#
+# The dependency addresses are injected on top of this and cannot be overridden
+# here. A service pointed at the real dependency instead of the proxy produces a
+# clean run that tested nothing.
+env = { RUST_LOG = "info" }
+
+
+# ----------------------------------------------------------------------------
+# Dependencies
+# ----------------------------------------------------------------------------
+#
+# Every one of them is real: real NATS, real Postgres, in real containers.
+# Fidelity is free at this stage and unarguable, and it matters more than speed.
+# A simulated dependency has to answer "is your sim really NATS?" every time it
+# finds something. A real container never does.
+
+# A JetStream stream and the consumer semantics that go with it.
+[[deps.nats.streams]]
+name = "LEDGER"
+subjects = ["ledger.>"]
+
+# Deliveries before the server gives up. The built-in `max_deliver_respected`
+# invariant checks the server honours it, and `no_infinite_redelivery` checks
+# your service does not defeat it by republishing, which max_deliver cannot
+# stop because every republish is a new message with a fresh delivery count.
+max_deliver = 5
+
+# How long the server waits for an ack before redelivering. The `ack_timeout`
+# fault holds an ack past this, so the ack lands at a server that has already
+# given up and redelivered. That race is where duplicate processing lives.
+ack_wait = "30s"
+
+# What happens when the stream is full.
+#
+#   old   drop the oldest message to make room, silently. The one that
+#         surprises people.
+#   new   refuse the write.
+discard = "old"
+
+# Where `discard = "old"` starts dropping. Leaving this unset means the stream
+# cannot fill, and a stream that cannot fill cannot reproduce the failure that
+# happens when it does.
+max_bytes = 1048576
+
+# The consumer to create. Defaults to "<name>_WORKER".
+consumer = "LEDGER_WORKER"
+
+# The consumer's filter. Defaults to the first subject.
+#
+# Worth setting explicitly, because the default is also the bug: "ledger.>"
+# matches "ledger.dead_letter", so the consumer receives its own dead letters,
+# fails them again, and dead-letters them again. Every piece behaves correctly,
+# which is why nobody catches it by reading the code. The built-in
+# `consumer_filter_excludes_dead_letter` invariant does.
+filter_subject = "ledger.>"
+
+# Optional. Pin the image when a vendor's behaviour is version-specific, which
+# is most of the time it matters. The default is pinned rather than `latest`,
+# because a scenario's whole value is that it reproduces.
+# image = "nats:2.10-alpine"
+
+
+[deps.postgres]
+# Directory of .sql files, applied in filename order before the service starts.
+# Filename order is stated rather than left to the filesystem: readdir returns
+# entries in whatever order it feels like, and migrations that applied in a
+# different order on CI than on a laptop produce a difference nobody thinks to
+# look for.
+migrations = "./migrations"
+
+# Database name. Also what a `check = "sql"` invariant queries.
+database = "ledger"
+
+# image = "postgres:17-alpine"
+
+
+# ----------------------------------------------------------------------------
+# Workload
+# ----------------------------------------------------------------------------
+#
+# Deliberately thin. The job is to get the system into the state where the
+# interesting orderings exist, not to generate load: these failures need one
+# order and a broker that misbehaves, not ten thousand orders.
+#
+# Each step takes exactly one of `publish`, `post` or `wait`.
+
+[[workload]]
+publish = "ledger.org.org_1.account.acct_1.order"
+payload = { order_id = "ord_1", kind = "fill", qty = 100 }
+
+# Repeat this step. Each repetition is a separate set of forks, so ten publishes
+# give the scheduler ten independent chances.
+repeat = 1
+
+# [[workload]]
+# post = "/v1/charges"
+# payload = { amount = 1000, currency = "usd" }
+
+# [[workload]]
+# Do nothing for this long. Use it to let the system settle, not to sequence two
+# events: a scenario that orders events by timing is relying on timing, and will
+# be flaky for exactly the reason this tool exists.
+# wait = "500ms"
+
+
+# ----------------------------------------------------------------------------
+# Faults
+# ----------------------------------------------------------------------------
+#
+# Nothing happens that is not listed here. A scenario permitting no faults still
+# runs and still checks its invariants, which is the honest baseline: if it
+# fails with an empty list, the bug was never about ordering.
+#
+#   ack_timeout      hold an ack until the server's ack_wait expires first. The
+#                    ack still arrives, at a server that has already given up.
+#   redelivery       drop a delivery so the server sends it again.
+#   swallow_ack      drop an ack outright. The server never learns the message
+#                    was handled.
+#   connection_drop  close a connection mid-conversation.
+#   reorder          let a later in-flight message overtake an earlier one.
+#   delay            delay a message without losing it.
+#   corrupt_frame    flip a byte. Rarely the cause of anything, and the only
+#                    fault that finds a vendor's broken framing.
+#   hold_statement   hold one statement until another completes. This is what
+#                    forces an exact transaction interleaving against a real
+#                    Postgres, which gives real serialization failures and real
+#                    isolation semantics.
+#
+# A fault that cannot fire is refused rather than ignored: `hold_statement` with
+# no [deps.postgres] is not a harmless no-op, it reads as covering an
+# interleaving that is never explored.
+[faults]
+enabled = ["ack_timeout", "redelivery", "connection_drop", "reorder"]
+
+
+# ----------------------------------------------------------------------------
+# Invariants
+# ----------------------------------------------------------------------------
+#
+# A scenario with none is refused: a run that asserts nothing cannot fail.
+
+# Built-ins ship with each adapter and need no configuration. They encode the
+# semantics of the dependency itself. `mis check` lists them and marks the ones
+# that are specified but not implemented yet.
+[[invariants]]
+builtin = "no_infinite_redelivery"
+# How far back to look for a recurring payload.
+window = "5m"
+# Identical payloads within that window before it is a loop rather than a retry.
+same_payload_max = 10
+
+[[invariants]]
+builtin = "max_deliver_respected"
+
+[[invariants]]
+builtin = "consumer_filter_excludes_dead_letter"
+
+[[invariants]]
+builtin = "eventually_quiescent"
+
+# The rest of the catalogue. Uncomment the ones whose dependency this scenario
+# declares; `mis check` lists what your file will actually run.
+#
+# NATS:
+#   max_deliver_respected
+#     a message is never delivered more than the stream's max_deliver.
+#   no_delivery_after_ack
+#     an acknowledged message is not delivered again. Identity is the payload,
+#     not the subject, so a second message on the same subject is ordinary
+#     traffic rather than a violation.
+#   no_infinite_redelivery
+#     the same payload does not recur past same_payload_max within window.
+#   consumer_filter_excludes_dead_letter
+#     a consumer's filter does not match its own dead-letter subject.
+#
+# Postgres:
+#   no_commit_after_error
+#     a connection that reported an error does not then commit. Postgres turns
+#     that commit into a rollback, so the write the service believes it made
+#     did not happen.
+#   no_query_outside_transaction         (specified, not implemented yet)
+#   set_local_role_survives_pooler       (specified, not implemented yet)
+#
+# HTTP:
+#   every_request_reaches_terminal_state
+#     every accepted request gets a response or an explicit failure. A request
+#     that is neither answered nor failed is the worst outcome for a payment:
+#     neither retrying nor not retrying is safe.
+#   idempotent_retry_returns_same_response
+#     a retried idempotency key returns what the first attempt returned. Not
+#     "returns success": the divergence that hurts is a second call returning a
+#     different resource id, because the caller then has two records for one
+#     payment.
+#
+# Any dependency:
+#   eventually_quiescent
+#     the system stops doing work once the workload is done.
+
+# Yours. Protocol invariants cannot know that fills never exceed order quantity.
+# Write five of these and get ten thousand orderings.
+[[invariants]]
+name = "fills_never_exceed_order_qty"
+check = "sql"
+query = """
+select 1 from orders o
+join fills f on f.order_id = o.id
+group by o.id, o.qty having sum(f.qty) > o.qty
+"""
+# `empty` is the shape to reach for: the query looks for the bad state, so it
+# needs no knowledge of how many rows a correct run produces and stays a test of
+# the service rather than of the scenario.
+#
+#   empty      the query must return no rows.
+#   non_empty  the query must return at least one.
+expect = "empty"
+
+
+# ----------------------------------------------------------------------------
+# Run limits
+# ----------------------------------------------------------------------------
+
+[run]
+# Hard ceiling on one run. A scenario that hits this is reported as a harness
+# timeout, never as an invariant violation.
+timeout = "60s"
+
+# How long the dependencies and the service get to come up.
+ready_timeout = "30s"
+
+# Idle time with no proxied traffic before the system counts as quiescent.
+#
+# A heuristic, and deliberately generous. Calling quiescence during a 40ms CPU
+# burst manufactures a failure that never happened, and an invented failure
+# costs more trust than a missed one. Phase 3 replaces this with real idleness
+# detection, which is also what makes the virtual clock safe.
+quiesce_after = "2s"

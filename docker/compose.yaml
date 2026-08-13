@@ -1,0 +1,34 @@
+# Local run.
+#
+#   docker compose run --rm mis check scenario.toml
+#   docker compose run --rm mis run scenario.toml --seed 8837291
+services:
+  mis:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: misorder:dev
+
+    # A second line of defence for signal handling. See the note in the
+    # Dockerfile: a killed misorder leaks the dependency containers it started,
+    # and the next run is what fails.
+    init: true
+
+    # Bounds how long teardown gets. Stopping two or three containers is fast,
+    # but a daemon under load is not, and being killed midway is exactly the
+    # case that leaks.
+    stop_grace_period: 30s
+
+    volumes:
+      # misorder starts real dependencies, so it needs the daemon. This is the
+      # whole reason to think before running the image: a container with the
+      # socket mounted is root on the host. Prefer running `mis` on the host and
+      # keeping this for CI images that are already privileged.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ..:/work
+
+    working_dir: /work
+
+    environment:
+      # misorder reads RUST_LOG in preference to this.
+      LOG_LEVEL: info

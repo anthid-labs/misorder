@@ -38,6 +38,21 @@ impl PointKind {
             PointKind::Response => "response",
         }
     }
+
+    /// What the thing at this fork is called in a sentence.
+    ///
+    /// Separate from [`PointKind::as_str`], which is the wire name. A
+    /// reproducer line reads "drop ack", not "drop Ack", and the two happen to
+    /// differ for `Deliver`: the fork is a delivery, the verb is to deliver.
+    pub fn noun(self) -> &'static str {
+        match self {
+            PointKind::Deliver => "delivery",
+            PointKind::Ack => "ack",
+            PointKind::Connection => "connection",
+            PointKind::Statement => "statement",
+            PointKind::Response => "response",
+        }
+    }
 }
 
 /// The identity of a fork, stable across runs.
@@ -155,6 +170,29 @@ impl Decision {
     }
 }
 
+impl Decision {
+    /// This decision as a phrase, given what it was applied to.
+    ///
+    /// The reproducer is the product, so its lines have to read as English at
+    /// 3am. Composing `Display` with the fork kind gives "deliver deliver" and
+    /// "drop ack", one of which is nonsense; this picks the verb that matches.
+    pub fn describe(&self, kind: PointKind) -> String {
+        let noun = kind.noun();
+
+        match self {
+            Decision::Deliver { delay } if delay.is_zero() => format!("allow {noun}"),
+            Decision::Deliver { delay } => {
+                format!("delay {noun} by {}ms", delay.as_millis())
+            }
+            Decision::Drop => format!("drop {noun}"),
+            Decision::Reorder { ahead_of } => format!("reorder {noun} behind #{ahead_of}"),
+            Decision::CloseConnection => "close connection".to_string(),
+            Decision::Corrupt { offset } => format!("corrupt {noun} at byte {offset}"),
+            Decision::Hold { until } => format!("hold {noun} until #{until}"),
+        }
+    }
+}
+
 impl std::fmt::Display for Decision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -195,6 +233,27 @@ mod tests {
         let annotated = bare.clone().with_detail("ledger.order");
 
         assert_eq!(bare.key, annotated.key);
+    }
+
+    #[test]
+    fn a_decision_reads_as_english_against_its_fork() {
+        assert_eq!(Decision::Drop.describe(PointKind::Ack), "drop ack");
+        assert_eq!(Decision::Drop.describe(PointKind::Deliver), "drop delivery");
+        assert_eq!(
+            Decision::Deliver {
+                delay: Duration::from_millis(40)
+            }
+            .describe(PointKind::Deliver),
+            "delay delivery by 40ms"
+        );
+        assert_eq!(
+            Decision::Hold { until: 3 }.describe(PointKind::Statement),
+            "hold statement until #3"
+        );
+        assert_eq!(
+            Decision::CloseConnection.describe(PointKind::Connection),
+            "close connection"
+        );
     }
 
     #[test]

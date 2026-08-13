@@ -1,0 +1,30 @@
+# The honest baseline.
+#
+# No faults permitted, so nothing is perturbed and the run is just your service
+# against real dependencies. Worth running first: if this fails, the bug was
+# never about ordering, and every seed you spend on it is spent on the wrong
+# question.
+#
+#   mis run examples/baseline_no_faults.toml
+
+name = "baseline"
+
+[[system]]
+run = "./target/debug/ledger"
+
+[[deps.nats.streams]]
+name = "LEDGER"
+subjects = ["ledger.>"]
+
+[[workload]]
+publish = "ledger.order"
+payload = { order_id = "ord_1", qty = 100 }
+
+[faults]
+enabled = []
+
+[[invariants]]
+builtin = "eventually_quiescent"
+
+[[invariants]]
+builtin = "max_deliver_respected"

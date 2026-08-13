@@ -30,7 +30,7 @@ postgres = ["misorder/postgres"]
 http = ["misorder/http"]
 
 [dependencies]
-misorder = { workspace = true, default-features = false }
+misorder = { workspace = true }
 
 clap = { workspace = true }
 dotenvy = { workspace = true }

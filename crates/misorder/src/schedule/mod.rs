@@ -167,6 +167,18 @@ mod tests {
             replayed.decide(point.clone());
         }
 
-        assert_eq!(replayed.trace().records, recorded.records);
+        // Compared on fork and decision, not on the whole record: `at` is
+        // wall-clock elapsed and differs between two runs by construction.
+        // A virtual clock in Phase 3 makes it match too, and this assertion
+        // will tighten then rather than being written to today's limitation.
+        let decisions = |trace: crate::trace::Trace| -> Vec<_> {
+            trace
+                .records
+                .iter()
+                .map(|record| (record.point.key, record.decision))
+                .collect()
+        };
+
+        assert_eq!(decisions(replayed.trace()), decisions(recorded));
     }
 }

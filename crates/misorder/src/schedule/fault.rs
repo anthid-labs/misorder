@@ -159,8 +159,10 @@ mod tests {
         for fault in FaultKind::ALL {
             let encoded = format!("v = \"{}\"", fault.as_str());
             let decoded: toml::Value = toml::from_str(&encoded).expect("parse");
-            let parsed: FaultKind =
-                decoded["v"].clone().try_into().expect("as_str matches serde");
+            let parsed: FaultKind = decoded["v"]
+                .clone()
+                .try_into()
+                .expect("as_str matches serde");
 
             assert_eq!(fault, parsed);
         }

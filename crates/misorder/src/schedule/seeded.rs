@@ -207,7 +207,11 @@ mod tests {
     fn permitting_no_faults_perturbs_nothing() {
         let source = Seeded::new(8_837_291, vec![], Profile::default());
 
-        assert!(points().iter().all(|point| source.decide(point).is_neutral()));
+        assert!(
+            points()
+                .iter()
+                .all(|point| source.decide(point).is_neutral())
+        );
     }
 
     #[test]
@@ -226,7 +230,11 @@ mod tests {
 
     #[test]
     fn a_permitted_fault_actually_fires_somewhere() {
-        let source = Seeded::new(8_837_291, vec![FaultKind::ConnectionDrop], Profile::default());
+        let source = Seeded::new(
+            8_837_291,
+            vec![FaultKind::ConnectionDrop],
+            Profile::default(),
+        );
 
         assert!(
             points()

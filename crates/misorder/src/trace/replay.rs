@@ -56,7 +56,11 @@ impl Replay {
 
     /// Forks the run reached that the trace does not describe.
     pub fn unmatched(&self) -> Vec<PointKey> {
-        self.seen.lock().expect("replay mutex poisoned").unmatched.clone()
+        self.seen
+            .lock()
+            .expect("replay mutex poisoned")
+            .unmatched
+            .clone()
     }
 
     /// Decisions in the trace the run never reached.

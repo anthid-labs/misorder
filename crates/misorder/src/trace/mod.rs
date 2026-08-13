@@ -268,9 +268,7 @@ pub(crate) mod duration_ms {
         serializer.serialize_u64(value.as_millis() as u64)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Duration, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
         u64::deserialize(deserializer).map(Duration::from_millis)
     }
 }
@@ -322,7 +320,11 @@ mod tests {
         let key = trace.records[0].point.key;
         let shrunk = trace.without(&[key]);
 
-        assert_eq!(shrunk.records.len(), 2, "records are neutralised, not removed");
+        assert_eq!(
+            shrunk.records.len(),
+            2,
+            "records are neutralised, not removed"
+        );
         assert_eq!(shrunk.active_count(), 1);
     }
 
