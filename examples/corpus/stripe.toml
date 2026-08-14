@@ -1,0 +1,53 @@
+# Stripe, from Stripe's own documentation.
+#
+# Every entry here is `documented`: the vendor says it does this. That is a
+# weaker claim than `recorded`, and it is still worth having, because a handler
+# written against the happy path breaks on all four and none of them is rare.
+#
+# What is missing from this file matters as much as what is in it. Two things a
+# Stripe integration meets in production cannot be got by reading:
+#
+#   How late a delivery gets. The median is under a second and the tail runs to
+#   hours during an incident. Nobody publishes a distribution.
+#
+#   How often a terminal event overtakes an earlier one. A
+#   customer.subscription.deleted arriving before the final
+#   invoice.payment_failed is rare enough to be invisible in staging and
+#   certain at volume.
+#
+# Both are frequencies, and a frequency has to be measured. An asserted one is
+# worse than an absent one, so they are absent. docs/LEDGER_IMPORT.md specifies
+# where the measurement comes from: the stripe_webhook_events table the
+# integration already writes, which has every one of these in it already.
+#
+# Used by examples/stripe_webhook_ordering.toml:
+#
+#   mis check examples/stripe_webhook_ordering.toml --corpus examples/corpus
+
+vendor = "stripe"
+
+[[behaviors]]
+name = "same_event_delivered_more_than_once"
+protocol = "http"
+describe = "An endpoint can receive the same event id twice, so a handler that deduplicates on the object id instead of the event id applies it twice."
+provenance = { kind = "documented", url = "https://docs.stripe.com/webhooks" }
+
+[[behaviors]]
+name = "events_arrive_out_of_generation_order"
+protocol = "http"
+describe = "Events are not delivered in the order they were generated, so a later event for one object can land before an earlier one."
+provenance = { kind = "documented", url = "https://docs.stripe.com/webhooks" }
+
+[[behaviors]]
+name = "events_carry_no_sequence_number"
+protocol = "http"
+describe = "An event carries an id and a created timestamp and no ordering token, so order can only be inferred from a clock and is never certain."
+# The API reference rather than the webhook guide: this is a claim about which
+# fields the event object has, and the field list is where that is settled.
+provenance = { kind = "documented", url = "https://docs.stripe.com/api/events/object" }
+
+[[behaviors]]
+name = "failed_delivery_retried_for_days"
+protocol = "http"
+describe = "A delivery that is not answered with a 2xx is retried with backoff over the following days, so one request the service dropped returns long after the run that dropped it."
+provenance = { kind = "documented", url = "https://docs.stripe.com/webhooks" }
