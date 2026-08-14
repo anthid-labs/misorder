@@ -195,10 +195,24 @@ mod tests {
         assert_eq!(names.len(), count, "duplicate builtin name");
     }
 
+    /// Whether this build has the feature an entry's dependency needs.
+    ///
+    /// `Implemented` is a claim about the source, not about every build of it.
+    /// A build with one feature on still refuses the other adapters' invariants,
+    /// and refuses them correctly, with a message naming the missing feature.
+    fn compiled_in(dependency: &str) -> bool {
+        match dependency {
+            "nats" => cfg!(feature = "nats"),
+            "postgres" => cfg!(feature = "postgres"),
+            "http" => cfg!(feature = "http"),
+            _ => true,
+        }
+    }
+
     #[test]
     fn every_implemented_entry_builds() {
         for entry in REGISTRY {
-            if entry.status != Status::Implemented {
+            if entry.status != Status::Implemented || !compiled_in(entry.dependency) {
                 continue;
             }
 

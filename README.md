@@ -372,11 +372,18 @@ on top reads and writes.
 ## Not done
 
 - **The NATS and Postgres wire adapters.** The seam is defined and the fault
-  vocabulary is complete; the codecs are not written.
+  vocabulary is complete; the codecs are not written. The HTTP one is:
+  `proxy::http` speaks HTTP/1.1 and asks at every fork.
+- **Wiring the adapters into a run.** `runner` does not start a proxy, and a
+  scenario has no way to ask for one. The HTTP adapter binds, serves and is
+  tested on its own; nothing calls it yet.
 - **Container orchestration.** `orchestrator::docker` connects to the daemon and
   reports a clear error; it does not yet start anything.
 - **The workload driver.** Publishing and posting are declared and validated,
-  and neither is wired to a client yet.
+  and neither is wired to a client yet. For HTTP the driver owes the ingress
+  proxy one thing: send the posts without waiting for each answer, then shut
+  down the write half, so a request the schedule deferred has something to be
+  overtaken by and something to release it.
 - **Quiescence detection.** Phase 1 uses an idle window, which is a heuristic.
   It is deliberately conservative: calling quiescence during a 40ms CPU burst
   would manufacture a failure that never happened.
