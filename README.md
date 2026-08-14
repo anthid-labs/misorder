@@ -270,14 +270,15 @@ That runs in seconds on every pull request and either reproduces or does not.
 
 ## Layout
 
-| Path                 | Purpose                                                          |
-| -------------------- | ---------------------------------------------------------------- |
-| `crates/misorder`    | The library: scenario, orchestrator, proxy, schedule, trace, invariants, shrinker. |
-| `apps/misorder-cli`  | The `mis` binary: argument parsing, logging setup, exit codes.    |
-| `examples/`          | Scenario files, including the one in this README.                 |
-| `docker/`            | Dockerfile and a compose example.                                 |
-| `docs/INTERFACES.md` | The stable formats anything built on top reads and writes.        |
-| `.github/workflows/` | Lint, test, scan, and publishing.                                 |
+| Path                    | Purpose                                                       |
+| ----------------------- | ------------------------------------------------------------- |
+| `crates/misorder`       | The library: scenario, orchestrator, proxy, schedule, trace, invariants, shrinker. |
+| `apps/misorder-cli`     | The `mis` binary: argument parsing, logging setup, exit codes. |
+| `examples/`             | Scenario files, including the one in this README, and a corpus. |
+| `docker/`               | Dockerfile and a compose example.                              |
+| `docs/INTERFACES.md`    | The stable formats anything built on top reads and writes.     |
+| `docs/LEDGER_IMPORT.md` | Reading recorded vendor behaviour out of a webhook events table. Specified, not implemented. |
+| `.github/workflows/`    | Lint, test, scan, and publishing.                              |
 
 The split is along process boundaries. Anything that decides, runs, or checks is
 in the library, so it can be embedded and tested without a binary; the CLI is
@@ -315,6 +316,12 @@ including the orderings nobody happened to observe. The scrubber is open source
 and inspectable, and that is load-bearing: the buyers are regulated, and silent
 collection of anything resembling production traffic is a compliance incident
 rather than a PR problem.
+
+There is a second way into the same corpus that needs nothing in the traffic
+path. Most integrations already store every webhook they received, and every
+duplicate, reorder and delay is already in that table.
+[`docs/LEDGER_IMPORT.md`](docs/LEDGER_IMPORT.md) specifies reading it, with
+Stripe as the worked example.
 
 **Phase 3, speed.** Quiescence detection first, because it gates everything: to
 advance a virtual clock safely you have to know the system is idle rather than

@@ -1,0 +1,178 @@
+# Stripe webhooks, applied twice and applied out of order.
+#
+# Stripe delivers at least once, in no guaranteed order, with no sequence
+# number on the event. All three are documented, none is rare, and a handler
+# that gets them wrong looks correct in staging: at a few hundred events a day
+# nobody sees it, and at a few million it happens every week.
+#
+# The two failures this asks about:
+#
+#   no_double_charge         one evt_id applied twice settles an invoice twice,
+#                            because the handler deduplicates on the object id
+#                            rather than the event id.
+#   terminal_state_is_final  the subscription is canceled, a late
+#                            invoice.payment_failed arrives, and the handler
+#                            reopens it. The customer is now billed for a
+#                            subscription they cancelled.
+#
+#   mis check examples/stripe_webhook_ordering.toml --corpus examples/corpus
+#   mis fuzz examples/stripe_webhook_ordering.toml --seeds 10000 --corpus examples/corpus
+#
+# The workload below is one subscription's lifecycle in the order Stripe
+# generated it. What order the handler sees is the scheduler's to decide, which
+# is the point: writing the events out of order by hand tests one ordering, and
+# the ordering that breaks you is not the one you thought of.
+
+name = "stripe_webhook_ordering"
+
+[[system]]
+run = "./target/debug/billing"
+# The handler's first act is to write, so an answered Postgres startup message
+# is the earliest honest signal that it is up. Posting a webhook before that
+# produces a failure that is entirely the harness's fault.
+ready_when = "postgres_connected"
+
+[deps.postgres]
+migrations = "./migrations"
+database = "billing"
+
+# Resolved against a corpus, and naming one the corpus does not have is an
+# error rather than a silent no-op.
+#
+# examples/corpus/stripe.toml has a fourth behaviour,
+# `failed_delivery_retried_for_days`, that this scenario does not name. A run
+# bounded by `timeout` cannot express a delivery that returns tomorrow. That is
+# a job for the virtual clock, not for pretending a 60 second run covered it.
+[vendors.stripe]
+behaviors = [
+  "same_event_delivered_more_than_once",
+  "events_arrive_out_of_generation_order",
+  "events_carry_no_sequence_number",
+]
+
+# `created` is Stripe's clock, and it is the only ordering information an event
+# carries. It is in the payload here because it is what the handler has to
+# reason with, and reasoning with it is exactly what goes wrong.
+
+[[workload]]
+post = "/webhooks/stripe"
+
+[workload.payload]
+id = "evt_1"
+type = "customer.subscription.created"
+created = 1_760_000_000
+
+[workload.payload.data.object]
+id = "sub_1"
+status = "incomplete"
+
+[[workload]]
+post = "/webhooks/stripe"
+
+[workload.payload]
+id = "evt_2"
+type = "invoice.payment_failed"
+created = 1_760_000_060
+
+[workload.payload.data.object]
+id = "in_1"
+subscription = "sub_1"
+amount_due = 4900
+
+# Delivered twice. Not a fault: this is Stripe delivering at least once, which
+# it says it does, and the second copy is ordinary traffic rather than an
+# error. Each repetition is a separate set of forks, so the two copies can
+# interleave inside the handler's transaction.
+[[workload]]
+post = "/webhooks/stripe"
+repeat = 2
+
+[workload.payload]
+id = "evt_3"
+type = "invoice.payment_succeeded"
+created = 1_760_000_120
+
+[workload.payload.data.object]
+id = "in_1"
+subscription = "sub_1"
+amount_paid = 4900
+
+# Generated before the cancellation below. Whether it arrives before it is the
+# scheduler's decision, and the run where it does not is the one that matters.
+[[workload]]
+post = "/webhooks/stripe"
+
+[workload.payload]
+id = "evt_4"
+type = "invoice.payment_failed"
+created = 1_760_000_180
+
+[workload.payload.data.object]
+id = "in_2"
+subscription = "sub_1"
+amount_due = 4900
+
+[[workload]]
+post = "/webhooks/stripe"
+
+[workload.payload]
+id = "evt_5"
+type = "customer.subscription.deleted"
+created = 1_760_000_240
+
+[workload.payload.data.object]
+id = "sub_1"
+status = "canceled"
+
+# `reorder` and `delay` are the two documented Stripe behaviours expressed in
+# the fault vocabulary that already exists. `connection_drop` is the third one:
+# a delivery the service never answered is a delivery Stripe sends again, so
+# the duplicate is not a separate fault but a consequence of this one.
+# `hold_statement` is what forces two copies of one event into an exact
+# interleaving against a real Postgres, which is where a handler that checks
+# for a row and then inserts it stops being safe.
+[faults]
+enabled = ["reorder", "delay", "connection_drop", "hold_statement"]
+
+# A webhook that is neither answered nor failed is the worst outcome here: the
+# service does not know whether it applied the event, and Stripe retries
+# regardless.
+[[invariants]]
+builtin = "every_request_reaches_terminal_state"
+
+# Postgres turns a commit after an error into a rollback, so the settlement the
+# handler believes it wrote did not happen and the event is marked processed.
+[[invariants]]
+builtin = "no_commit_after_error"
+
+[[invariants]]
+builtin = "eventually_quiescent"
+
+# `idempotent_retry_returns_same_response` is deliberately not here. It keys off
+# the idempotency key on an outbound request, and an inbound webhook has none:
+# the deduplication key is evt_id in the body. Naming it would add a line that
+# reads like coverage and never fires, which is the exact failure this format
+# refuses everywhere else.
+
+[[invariants]]
+name = "no_double_charge"
+check = "sql"
+query = """
+select 1 from settlements
+group by invoice_id
+having count(*) > 1
+"""
+expect = "empty"
+
+[[invariants]]
+name = "terminal_state_is_final"
+check = "sql"
+query = """
+select 1
+from subscription_state_history terminal
+join subscription_state_history later
+  on later.subscription_id = terminal.subscription_id
+ and later.applied_at > terminal.applied_at
+where terminal.state = 'canceled'
+"""
+expect = "empty"
