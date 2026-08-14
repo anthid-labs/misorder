@@ -43,9 +43,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::event::{ConnectionId, Event, Observed};
 use crate::schedule::Scheduler;
 use crate::trace::{Decision, DecisionPoint, PointKind};
@@ -194,6 +195,113 @@ impl ProxyContext {
 
     pub fn scheduler(&self) -> &Scheduler {
         &self.scheduler
+    }
+}
+
+/// The adapters bound and serving for one run.
+///
+/// Binding is separated from serving because the service under test is started
+/// between the two: it needs every proxy's address in its environment before it
+/// runs, and an adapter still binding when the service came up would look to
+/// the service like a dependency that was not there.
+pub struct Fleet {
+    endpoints: Vec<Endpoint>,
+    serving: JoinSet<Result<()>>,
+}
+
+impl Fleet {
+    /// Binds every adapter to its upstream, then starts them all.
+    pub async fn start(
+        adapters: Vec<(Box<dyn Adapter>, String)>,
+        scheduler: &Scheduler,
+        events: &EventSink,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
+        let mut bound = Vec::with_capacity(adapters.len());
+        let mut endpoints = Vec::with_capacity(adapters.len());
+
+        for (mut adapter, upstream) in adapters {
+            let endpoint = adapter.bind(&upstream).await?;
+
+            tracing::debug!(
+                protocol = endpoint.protocol,
+                listen = %endpoint.listen,
+                upstream,
+                "proxy bound"
+            );
+
+            endpoints.push(endpoint);
+            bound.push((adapter, upstream));
+        }
+
+        let mut serving = JoinSet::new();
+
+        for (mut adapter, upstream) in bound {
+            // A clone rather than a share: the scheduler's recorder is behind an
+            // Arc, so every adapter writes into one trace, which is what makes
+            // a run with two protocols replayable as one run.
+            let context =
+                ProxyContext::new(scheduler.clone(), upstream, events.clone(), cancel.clone());
+
+            serving.spawn(async move { adapter.serve(context).await });
+        }
+
+        Ok(Self { endpoints, serving })
+    }
+
+    pub fn endpoints(&self) -> &[Endpoint] {
+        &self.endpoints
+    }
+
+    pub fn endpoint(&self, protocol: &str) -> Option<&Endpoint> {
+        self.endpoints
+            .iter()
+            .find(|endpoint| endpoint.protocol == protocol)
+    }
+
+    /// What the service under test is started with.
+    pub fn env(&self) -> Vec<(String, String)> {
+        self.endpoints
+            .iter()
+            .flat_map(|endpoint| endpoint.env.iter().cloned())
+            .collect()
+    }
+
+    /// Waits for every adapter to stop, after the caller has cancelled.
+    ///
+    /// Not optional and not something to skip on the error path. Each adapter
+    /// holds a clone of the event sink, and a run cannot finish reading its
+    /// events until the last clone is dropped, so a fleet left unjoined turns
+    /// into a run that never ends.
+    pub async fn stop(mut self) -> Result<()> {
+        let mut first_error = None;
+
+        while let Some(joined) = self.serving.join_next().await {
+            match joined {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    first_error.get_or_insert(error);
+                }
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => {
+                    first_error
+                        .get_or_insert(Error::Internal(format!("a proxy task panicked: {error}")));
+                }
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::fmt::Debug for Fleet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fleet")
+            .field("endpoints", &self.endpoints)
+            .finish_non_exhaustive()
     }
 }
 
