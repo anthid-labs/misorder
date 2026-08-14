@@ -24,8 +24,10 @@ load-bearing:
   this repository is free to change in any release. If the platform linked the
   crate, the open core's internals would become a compatibility surface, and an
   open core that cannot be refactored stops being developed.
-- **The platform stays unblocked.** It can be Go, TypeScript, or anything else,
-  because parsing JSON is not a language commitment.
+- **The platform stays unblocked.** It can be Python, Go, TypeScript, or
+  anything else, because parsing JSON is not a language commitment. More than
+  one language is expected to sit on this seam, and a Rust API would have made
+  that choice for all of them.
 - **The boundary stays auditable.** A buyer in a regulated segment can read this
   repository and see the complete list of what leaves the machine, because the
   engine has no network client, no credentials and nothing to send anywhere.
