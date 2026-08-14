@@ -51,6 +51,18 @@ cwd = "."
 # clean run that tested nothing.
 env = { RUST_LOG = "info" }
 
+# The variable your service reads its own listening port from.
+#
+# misorder picks the port and injects it, rather than you naming one here.
+# `mis fuzz --parallel 16` has sixteen copies of your service up at once, and a
+# port written in a file would have them fighting over it, which reads as a
+# flaky service rather than as a scenario that cannot be run twice.
+#
+# A scenario with a `post` step gets an HTTP proxy in front of the service, and
+# that proxy is what the workload posts to. Your service never learns it is
+# there: it binds the port it was given and answers what arrives.
+listen_env = "PORT"
+
 
 # ----------------------------------------------------------------------------
 # Dependencies

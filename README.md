@@ -374,19 +374,45 @@ on top reads and writes.
 - **The NATS and Postgres wire adapters.** The seam is defined and the fault
   vocabulary is complete; the codecs are not written. The HTTP one is:
   `proxy::http` speaks HTTP/1.1 and asks at every fork.
-- **Wiring the adapters into a run.** `runner` does not start a proxy, and a
-  scenario has no way to ask for one. The HTTP adapter binds, serves and is
-  tested on its own; nothing calls it yet.
 - **Container orchestration.** `orchestrator::docker` connects to the daemon and
-  reports a clear error; it does not yet start anything.
-- **The workload driver.** Publishing and posting are declared and validated,
-  and neither is wired to a client yet. For HTTP the driver owes the ingress
-  proxy one thing: send the posts without waiting for each answer, then shut
-  down the write half, so a request the schedule deferred has something to be
-  overtaken by and something to release it.
+  reports a clear error; it does not yet start anything. So a scenario that
+  declares `[deps.nats]` or `[deps.postgres]` still cannot run, and one that
+  declares neither now can.
+- **Publishing a workload step.** `post` drives the service through the HTTP
+  proxy; `publish` still needs the NATS client.
 - **Quiescence detection.** Phase 1 uses an idle window, which is a heuristic.
   It is deliberately conservative: calling quiescence during a 40ms CPU burst
   would manufacture a failure that never happened.
+
+## What runs today
+
+A scenario with no declared dependencies runs end to end, with no Docker
+anywhere near it:
+
+```toml
+name = "webhooks_in_any_order"
+
+[[system]]
+run = "./target/debug/billing"
+
+[[workload]]
+post = "/webhooks/stripe"
+payload = { id = "evt_1", type = "invoice.payment_succeeded" }
+
+[faults]
+enabled = ["delay", "reorder", "connection_drop"]
+
+[[invariants]]
+builtin = "every_request_reaches_terminal_state"
+```
+
+misorder reserves a port, binds an HTTP proxy in front of your service, starts
+the service with that port in its environment, waits for it to listen, posts the
+workload through the proxy, and asks the scheduler at every accept, every
+request and every response.
+
+Your service learns none of this. It binds the port it was given and answers
+what arrives, which is the whole language stance in one sentence.
 
 ## Contributing
 

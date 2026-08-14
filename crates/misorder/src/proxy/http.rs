@@ -57,13 +57,26 @@
 //! waits for every response before sending the next gives a reorder nothing to
 //! swap with, and the deferred request then waits for the write half to close.
 //!
+//! # Two hops, not one pipe
+//!
+//! The connection from the client and the connection to the service are
+//! separate, and everything hop-by-hop stops in the middle: `Connection`,
+//! `Keep-Alive`, `Upgrade`, and the framing headers. A service that answers
+//! with `Connection: close`, or that speaks HTTP/1.0 and closes after every
+//! response, ends its own hop and the next request opens a fresh one.
+//!
+//! Passing that through instead would let such a service end a run's front door
+//! after one delivery. The rest of the workload would go nowhere, the run would
+//! pass, and nothing in the trace would say why, which is the failure this
+//! whole format exists to prevent arriving through the adapter.
+//!
 //! # What this does not do
 //!
 //! No TLS and no HTTP/2. Both are real gaps and neither is in the way yet: the
 //! service under test is on loopback, and a vendor's delivery has already been
 //! terminated by the time misorder sees it.
 //!
-//! `Transfer-Encoding` is hop-by-hop, so a chunked body is decoded and
+//! `Transfer-Encoding` is hop-by-hop too, so a chunked body is decoded and
 //! forwarded with a `Content-Length`. That is a re-framing the specification
 //! allows a proxy to do, and it keeps one representation of a body in the
 //! events rather than two.
@@ -100,6 +113,21 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 /// Stripe spells it the first way and enough others spell it the second that
 /// checking both costs nothing. A vendor with a third spelling is a line here.
 const IDEMPOTENCY_HEADERS: [&str; 2] = ["idempotency-key", "x-idempotency-key"];
+
+/// Headers that describe one hop rather than the message, and so end here.
+///
+/// `Content-Length` and `Transfer-Encoding` because the body has been decoded
+/// and one length is written back in their place. `Connection`, `Keep-Alive`
+/// and `Upgrade` because what the service wants done with its own socket is not
+/// an instruction to the client, and forwarding it would let the service close
+/// a connection it cannot see.
+const HOP_BY_HOP: [&str; 5] = [
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "upgrade",
+];
 
 /// Proxies HTTP in front of the service under test.
 #[derive(Debug, Default)]
@@ -196,6 +224,14 @@ impl Adapter for HttpAdapter {
             });
         }
 
+        // Cancellation reaches the connections too. A task parked on a read
+        // from a client that will never send again would otherwise keep the
+        // join below waiting forever, and the run would end as a timeout with
+        // nothing in the trace to explain it. A request still in flight when
+        // this fires is reported by `every_request_reaches_terminal_state` at
+        // quiescence, which is where an unanswered request belongs anyway.
+        connections.abort_all();
+
         // Joined rather than detached. A connection task that outlived the run
         // would be writing to a service the runner has already torn down, and
         // its error would surface as a timeout somewhere unrelated.
@@ -224,6 +260,53 @@ impl Adapter for HttpAdapter {
     }
 }
 
+/// The connection to the service, and the fact that it is a separate hop.
+///
+/// A service that answers with `Connection: close`, or that speaks HTTP/1.0 and
+/// closes after every response, has ended this hop and said nothing about the
+/// one the workload is holding. Tying the two together would let such a service
+/// end a run's front door after a single delivery, and the rest of the workload
+/// would go nowhere with nothing in the trace to say why.
+#[derive(Debug)]
+struct Upstream {
+    address: String,
+    open: Option<(BufReader<OwnedReadHalf>, OwnedWriteHalf)>,
+}
+
+impl Upstream {
+    fn new(address: &str) -> Self {
+        Self {
+            address: address.to_string(),
+            open: None,
+        }
+    }
+
+    /// The connection, opening one if the last was closed.
+    async fn connect(&mut self) -> Result<(&mut BufReader<OwnedReadHalf>, &mut OwnedWriteHalf)> {
+        if self.open.is_none() {
+            let stream = TcpStream::connect(&self.address).await.map_err(|error| {
+                Error::Environment(format!(
+                    "the service under test did not accept a connection on {}: {error}",
+                    self.address
+                ))
+            })?;
+
+            let (read, write) = stream.into_split();
+
+            self.open = Some((BufReader::new(read), write));
+        }
+
+        let (read, write) = self.open.as_mut().expect("just opened");
+
+        Ok((read, write))
+    }
+
+    /// Lets the connection go, so the next request opens a fresh one.
+    fn forget(&mut self) {
+        self.open = None;
+    }
+}
+
 /// One client connection, from accept to close.
 ///
 /// Sequential on purpose. Two tasks serving one connection would race over the
@@ -234,20 +317,14 @@ async fn serve_connection(
     connection: ConnectionId,
     client: TcpStream,
 ) -> Result<()> {
-    let upstream = TcpStream::connect(&context.upstream)
-        .await
-        .map_err(|error| {
-            Error::Environment(format!(
-                "the service under test did not accept a connection on {}: {error}",
-                context.upstream
-            ))
-        })?;
-
     let (client_read, mut client_write) = client.into_split();
-    let (upstream_read, mut upstream_write) = upstream.into_split();
 
     let mut client_read = BufReader::new(client_read);
-    let mut upstream_read = BufReader::new(upstream_read);
+    let mut upstream = Upstream::new(&context.upstream);
+
+    // Opened up front so a service that is not there is reported now, as the
+    // environment problem it is, rather than as a request that went unanswered.
+    upstream.connect().await?;
 
     // Requests the schedule deferred, most recently deferred first. `Reorder`
     // always names the fork immediately after itself, so releasing in reverse
@@ -299,16 +376,7 @@ async fn serve_connection(
             batch.push((order, request, Decision::NEUTRAL));
         }
 
-        if !exchange(
-            context,
-            connection,
-            batch,
-            &mut upstream_write,
-            &mut upstream_read,
-            &mut client_write,
-        )
-        .await?
-        {
+        if !exchange(context, connection, batch, &mut upstream, &mut client_write).await? {
             return Ok(());
         }
     }
@@ -320,15 +388,7 @@ async fn serve_connection(
             .map(|(order, request)| (order, request, Decision::NEUTRAL))
             .collect();
 
-        exchange(
-            context,
-            connection,
-            batch,
-            &mut upstream_write,
-            &mut upstream_read,
-            &mut client_write,
-        )
-        .await?;
+        exchange(context, connection, batch, &mut upstream, &mut client_write).await?;
     }
 
     Ok(())
@@ -353,8 +413,7 @@ async fn exchange(
     context: &ProxyContext,
     connection: ConnectionId,
     batch: Vec<(u64, Request, Decision)>,
-    upstream_write: &mut OwnedWriteHalf,
-    upstream_read: &mut BufReader<OwnedReadHalf>,
+    upstream: &mut Upstream,
     client_write: &mut OwnedWriteHalf,
 ) -> Result<bool> {
     let mut answers = Vec::with_capacity(batch.len());
@@ -372,8 +431,10 @@ async fn exchange(
             corrupt(&mut encoded, offset);
         }
 
-        upstream_write.write_all(&encoded).await?;
-        upstream_write.flush().await?;
+        let (read, write) = upstream.connect().await?;
+
+        write.write_all(&encoded).await?;
+        write.flush().await?;
 
         context.observe(
             connection,
@@ -385,7 +446,24 @@ async fn exchange(
             }),
         );
 
-        let response = read_response(upstream_read, &request.method).await?;
+        let response = match read_response(read, &request.method).await {
+            Ok(response) => response,
+            Err(error) => {
+                // The service was sent a request and closed instead of
+                // answering. That is a finding rather than a harness failure,
+                // and it is already one: the request was observed and no
+                // response follows it, so `every_request_reaches_terminal_state`
+                // reports it. Erroring here would turn the service's own bug
+                // into exit code 1 and hide it.
+                tracing::debug!(%connection, %error, "the service closed without answering");
+
+                context.observe(connection, Event::Http(HttpEvent::ConnectionClosed));
+
+                upstream.forget();
+
+                break;
+            }
+        };
 
         context.observe(
             connection,
@@ -395,13 +473,20 @@ async fn exchange(
             }),
         );
 
+        // Hop-by-hop, so it ends here. The service saying it wants this
+        // connection closed says nothing about the one the client is holding,
+        // and passing it on would let a HTTP/1.0 service end a run's front door
+        // after one delivery.
+        if response.closes_connection() {
+            upstream.forget();
+        }
+
         answers.push((order, response));
     }
 
     answers.sort_by_key(|(order, _)| *order);
 
     let mut deferred: Vec<Response> = Vec::new();
-    let mut alive = true;
 
     for (_, response) in answers {
         let decision = context.decide(PointKind::Response, connection, response.status.to_string());
@@ -433,8 +518,6 @@ async fn exchange(
             }
         }
 
-        alive &= !response.closes_connection();
-
         write_response(client_write, &response, decision).await?;
     }
 
@@ -442,12 +525,10 @@ async fn exchange(
     // first, so it goes now rather than waiting for a fork that will not
     // arrive.
     while let Some(response) = deferred.pop() {
-        alive &= !response.closes_connection();
-
         write_response(client_write, &response, Decision::NEUTRAL).await?;
     }
 
-    Ok(alive)
+    Ok(true)
 }
 
 async fn write_response(
@@ -524,19 +605,33 @@ struct Response {
 }
 
 impl Response {
+    /// Whether the service has finished with its side of the connection.
     fn closes_connection(&self) -> bool {
-        self.open_ended
-            || header(&self.headers, "connection").is_some_and(|value| {
-                value
-                    .split(',')
-                    .any(|token| token.trim().eq_ignore_ascii_case("close"))
-            })
+        if self.open_ended {
+            return true;
+        }
+
+        if let Some(value) = header(&self.headers, "connection") {
+            return value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("close"));
+        }
+
+        // HTTP/1.0 has no persistent connection unless it asks for one, and a
+        // proxy that assumed otherwise would write its next request into a
+        // socket the service had already finished with.
+        !self.version.eq_ignore_ascii_case("HTTP/1.1")
     }
 
+    /// Always HTTP/1.1 and always with a length when there is a body.
+    ///
+    /// The hop to the client is this proxy's, not the service's. A body the
+    /// service framed by closing its socket has been read in full by the time
+    /// this runs, so it can be given the length it turned out to have, and the
+    /// client keeps a connection it has more to send on.
     fn encode(&self) -> Vec<u8> {
         let mut out = format!(
-            "{} {} {}\r\n",
-            self.version,
+            "HTTP/1.1 {} {}\r\n",
             self.status,
             if self.reason.is_empty() {
                 "OK"
@@ -546,11 +641,7 @@ impl Response {
         )
         .into_bytes();
 
-        let length = if self.open_ended || !has_body(self.status) {
-            None
-        } else {
-            Some(self.body.len())
-        };
+        let length = has_body(self.status).then_some(self.body.len());
 
         write_headers(&mut out, &self.headers, length);
         out.extend_from_slice(&self.body);
@@ -568,9 +659,7 @@ impl Response {
 /// proxy corrupts a stream by accident rather than by decision.
 fn write_headers(out: &mut Vec<u8>, headers: &[(String, String)], length: Option<usize>) {
     for (name, value) in headers {
-        if name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("transfer-encoding")
-        {
+        if HOP_BY_HOP.iter().any(|hop| name.eq_ignore_ascii_case(hop)) {
             continue;
         }
 
@@ -946,7 +1035,12 @@ mod tests {
     /// Speaks HTTP with this module's own reader, which is deliberate: a bug
     /// that makes the proxy emit something it cannot itself read is a bug the
     /// service would have hit too.
-    async fn service(listener: TcpListener, seen: Arc<Mutex<Vec<Request>>>, status: u16) {
+    async fn service(
+        listener: TcpListener,
+        seen: Arc<Mutex<Vec<Request>>>,
+        status: u16,
+        closes: bool,
+    ) {
         while let Ok((stream, _)) = listener.accept().await {
             let seen = Arc::clone(&seen);
 
@@ -961,6 +1055,14 @@ mod tests {
 
                     let response = if status == 204 {
                         "HTTP/1.1 204 No Content\r\n\r\n".to_string()
+                    } else if closes {
+                        // What python's http.server does, and half the
+                        // frameworks anyone points this at: HTTP/1.0, one
+                        // answer, then the socket goes away.
+                        format!(
+                            "HTTP/1.0 {status} OK\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
                     } else {
                         format!(
                             "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\n\r\n{body}",
@@ -969,6 +1071,10 @@ mod tests {
                     };
 
                     if write.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+
+                    if closes {
                         return;
                     }
                 }
@@ -986,10 +1092,15 @@ mod tests {
 
     impl Harness {
         async fn start(source: Arc<dyn DecisionSource>) -> Self {
-            Self::answering(source, 200).await
+            Self::answering(source, 200, false).await
         }
 
-        async fn answering(source: Arc<dyn DecisionSource>, status: u16) -> Self {
+        /// A service that answers once and closes, the way HTTP/1.0 does.
+        async fn closing(source: Arc<dyn DecisionSource>) -> Self {
+            Self::answering(source, 200, true).await
+        }
+
+        async fn answering(source: Arc<dyn DecisionSource>, status: u16, closes: bool) -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0))
                 .await
                 .expect("bind the service");
@@ -997,7 +1108,7 @@ mod tests {
 
             let seen = Arc::new(Mutex::new(Vec::new()));
 
-            tokio::spawn(service(listener, Arc::clone(&seen), status));
+            tokio::spawn(service(listener, Arc::clone(&seen), status, closes));
 
             let mut adapter = HttpAdapter::new();
             let endpoint = adapter.bind(&upstream).await.expect("bind the proxy");
@@ -1245,7 +1356,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_response_with_no_body_does_not_swallow_the_next_one() {
-        let harness = Harness::answering(At::nothing(), 204).await;
+        let harness = Harness::answering(At::nothing(), 204, false).await;
 
         let answers = harness.post(&["/a", "/b"]).await;
 
@@ -1395,6 +1506,88 @@ mod tests {
         assert!(!encoded.contains("999"), "{encoded}");
         assert!(!encoded.contains("Transfer-Encoding"), "{encoded}");
         assert!(encoded.ends_with("\r\n\r\nhello"), "{encoded}");
+    }
+
+    #[tokio::test]
+    async fn a_service_that_closes_after_each_answer_still_gets_the_rest() {
+        let harness = Harness::closing(At::nothing()).await;
+
+        let answers = harness.post(&["/first", "/second", "/third"]).await;
+
+        assert_eq!(
+            answers.len(),
+            3,
+            "the service's hop closing is not the client's hop closing"
+        );
+
+        let (seen, _) = harness.finish().await;
+
+        assert_eq!(
+            seen.iter()
+                .map(|request| request.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/first", "/second", "/third"],
+            "every delivery should have reached the service on a fresh connection"
+        );
+    }
+
+    #[test]
+    fn an_encoded_response_does_not_pass_on_the_hop_it_was_given() {
+        let response = Response {
+            version: "HTTP/1.0".to_string(),
+            status: 200,
+            reason: "OK".to_string(),
+            headers: vec![
+                ("Connection".to_string(), "close".to_string()),
+                ("X-Request-Id".to_string(), "abc".to_string()),
+            ],
+            body: Bytes::from("ok"),
+            open_ended: false,
+        };
+
+        assert!(response.closes_connection(), "upstream is finished");
+
+        let encoded = String::from_utf8(response.encode()).expect("utf-8");
+
+        assert!(encoded.starts_with("HTTP/1.1 200 OK\r\n"), "{encoded}");
+        assert!(!encoded.contains("Connection"), "{encoded}");
+        assert!(encoded.contains("X-Request-Id: abc\r\n"), "{encoded}");
+    }
+
+    #[test]
+    fn a_body_framed_by_closing_is_given_the_length_it_turned_out_to_have() {
+        let response = Response {
+            version: "HTTP/1.1".to_string(),
+            status: 200,
+            reason: "OK".to_string(),
+            headers: Vec::new(),
+            body: Bytes::from("read until close"),
+            open_ended: true,
+        };
+
+        let encoded = String::from_utf8(response.encode()).expect("utf-8");
+
+        assert!(encoded.contains("Content-Length: 16\r\n"), "{encoded}");
+    }
+
+    #[test]
+    fn a_http_1_0_response_ends_its_hop_unless_it_asks_not_to() {
+        let mut response = Response {
+            version: "HTTP/1.0".to_string(),
+            status: 200,
+            reason: "OK".to_string(),
+            headers: Vec::new(),
+            body: Bytes::new(),
+            open_ended: false,
+        };
+
+        assert!(response.closes_connection());
+
+        response
+            .headers
+            .push(("Connection".to_string(), "keep-alive".to_string()));
+
+        assert!(!response.closes_connection(), "it asked");
     }
 
     #[test]

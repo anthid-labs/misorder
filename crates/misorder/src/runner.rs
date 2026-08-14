@@ -5,6 +5,7 @@
 //! reached four ways, which is deliberate: if replay had its own path through
 //! the system, the thing it reproduced would be that path.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,12 +17,13 @@ use crate::error::{Error, Result};
 use crate::event::{Event, Lifecycle, Observed};
 use crate::invariant::{CheckContext, Checker, Violation};
 use crate::orchestrator::Environment;
-use crate::proxy::EventSink;
+use crate::orchestrator::service::{self, Service};
+use crate::proxy::{Adapter, EventSink, Fleet};
 use crate::report::Reproducer;
 use crate::report::run::{
     self, Decisions, Engine, Faults, RunReport, ScenarioRef, ShardRef, SweepReport, Verdict,
 };
-use crate::scenario::file::Resolved;
+use crate::scenario::file::{Resolved, Step};
 use crate::schedule::{Profile, Scheduler};
 use crate::shrink::{self, Oracle};
 use crate::trace::Trace;
@@ -451,7 +453,14 @@ impl Runner {
         })
     }
 
-    /// Starts the service, drives the workload, waits for the system to settle.
+    /// Starts the proxies and the service, drives the workload, waits for the
+    /// system to settle.
+    ///
+    /// Ports first, then proxies, then the service, and the order is not a
+    /// preference. An ingress proxy forwards to the service, so it cannot bind
+    /// until the service's address is settled; the service is pointed at its
+    /// dependencies through the environment the proxies produced, so it cannot
+    /// start until they have bound.
     async fn drive(
         &self,
         environment: &Environment,
@@ -460,22 +469,113 @@ impl Runner {
         cancel: &CancellationToken,
         started: Instant,
     ) -> Result<()> {
-        let _ = (scheduler, cancel);
+        let mut addresses = Vec::with_capacity(self.scenario.system.len());
 
-        for system in &self.scenario.system {
-            events.emit_lifecycle(
-                started.elapsed(),
-                Event::Lifecycle(Lifecycle::SystemStarted {
-                    command: system.run.clone(),
-                }),
-            );
+        for _ in &self.scenario.system {
+            addresses.push(service::reserve_port().await?);
         }
 
-        Driver::new(environment, events)
+        let fleet = Fleet::start(self.adapters(&addresses)?, scheduler, events, cancel).await?;
+
+        let mut services = Vec::with_capacity(self.scenario.system.len());
+        let mut failed_to_start = None;
+
+        for (system, address) in self.scenario.system.iter().zip(&addresses) {
+            match Service::start(system, *address, &fleet.env(), &self.scenario.run).await {
+                Ok(service) => {
+                    events.emit_lifecycle(
+                        started.elapsed(),
+                        Event::Lifecycle(Lifecycle::SystemStarted {
+                            command: system.run.clone(),
+                        }),
+                    );
+
+                    services.push(service);
+                }
+                Err(error) => {
+                    failed_to_start = Some(error);
+                    break;
+                }
+            }
+        }
+
+        let driven = match failed_to_start {
+            Some(error) => Err(error),
+            None => {
+                self.drive_workload(environment, events, &fleet, started)
+                    .await
+            }
+        };
+
+        // Unconditional from here. Every adapter holds a clone of the event
+        // sink, so a fleet left unjoined is a run that never finishes reading
+        // its own events, and a service left running holds the port the next
+        // run is about to be handed.
+        cancel.cancel();
+
+        let served = fleet.stop().await;
+
+        for service in services {
+            service.stop().await;
+        }
+
+        driven?;
+        served
+    }
+
+    async fn drive_workload(
+        &self,
+        environment: &Environment,
+        events: &EventSink,
+        fleet: &Fleet,
+        started: Instant,
+    ) -> Result<()> {
+        let mut driver = Driver::new(environment, events);
+
+        if let Some(endpoint) = fleet.endpoint("http") {
+            driver = driver.through_ingress(endpoint.listen);
+        }
+
+        driver
             .run(&self.scenario.workload, started.elapsed())
             .await?;
 
         self.await_quiescence(events, started).await
+    }
+
+    /// Which proxies this run needs.
+    ///
+    /// Read off the workload rather than declared in the file. A scenario with
+    /// a `post` step has a front door and one without has nothing to sit in
+    /// front of, so the file already says it and a key asking again would be a
+    /// second place for the answer to be wrong.
+    fn adapters(&self, addresses: &[SocketAddr]) -> Result<Vec<(Box<dyn Adapter>, String)>> {
+        let mut adapters: Vec<(Box<dyn Adapter>, String)> = Vec::new();
+
+        let posts = self
+            .scenario
+            .workload
+            .iter()
+            .any(|step| matches!(step, Step::Post { .. }));
+
+        if let (true, Some(address)) = (posts, addresses.first()) {
+            #[cfg(feature = "http")]
+            adapters.push((
+                Box::new(crate::proxy::http::HttpAdapter::new()),
+                address.to_string(),
+            ));
+
+            // Refused rather than run without it. A post that went straight at
+            // the service would explore no ordering, and the run would pass
+            // having tested nothing, which is the failure this whole format is
+            // built to prevent.
+            #[cfg(not(feature = "http"))]
+            return Err(Error::Unsupported(format!(
+                "this scenario posts to {address}, but this build has no http feature"
+            )));
+        }
+
+        Ok(adapters)
     }
 
     /// Waits for an idle window with no proxied traffic.

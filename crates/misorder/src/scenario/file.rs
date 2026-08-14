@@ -146,6 +146,20 @@ pub struct System {
     /// testing nothing.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+
+    /// The variable this service reads its own listening port from.
+    ///
+    /// misorder picks the port and injects it, rather than the scenario naming
+    /// one. `mis fuzz --parallel 16` has sixteen copies of the service up at
+    /// once, and a port written in a file would have them fighting over it,
+    /// which reads as a flaky service rather than as a scenario that cannot be
+    /// run twice.
+    #[serde(default = "default_listen_env")]
+    pub listen_env: String,
+}
+
+fn default_listen_env() -> String {
+    "PORT".to_string()
 }
 
 /// How readiness is detected.

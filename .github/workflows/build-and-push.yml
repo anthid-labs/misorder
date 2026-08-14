@@ -52,13 +52,18 @@ jobs:
       # one. A missing `#[cfg]` compiles fine with the default set and fails
       # only for the person who turned the others off, which is the worst place
       # to find it.
-      - name: Check each protocol feature builds alone
+      #
+      # `test` rather than `check`, because compiling is the weaker half. A test
+      # that assumes every adapter is present passes with the default set and
+      # fails for exactly the person this step exists for, and checking alone
+      # never compiles the tests at all.
+      - name: Test each protocol feature alone
         run: |
           set -euo pipefail
-          cargo check -p misorder --no-default-features
+          cargo test -p misorder --no-default-features --lib
           for feature in nats postgres http; do
             echo "::group::misorder --features $feature"
-            cargo check -p misorder --no-default-features --features "$feature"
+            cargo test -p misorder --no-default-features --features "$feature" --lib
             echo "::endgroup::"
           done
 

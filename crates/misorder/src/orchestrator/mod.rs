@@ -21,6 +21,7 @@
 //! stays even then, because it is what the simulator gets diffed against.
 
 pub mod docker;
+pub mod service;
 pub mod topology;
 
 use std::collections::BTreeMap;
@@ -60,6 +61,15 @@ impl Environment {
             ready_timeout = ?settings.ready_timeout,
             "starting dependencies"
         );
+
+        // Nothing declared means nothing to start, and in particular no reason
+        // to need a Docker daemon. A scenario that depends on nothing should
+        // run on a machine that has never installed one, and reaching for the
+        // socket first would report "the Docker daemon did not answer" for a
+        // run that was never going to use it.
+        if deps.declared().is_empty() {
+            return Ok(Self::default());
+        }
 
         let client = docker::Client::connect().await?;
 
