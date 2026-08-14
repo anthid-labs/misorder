@@ -29,6 +29,8 @@
 //! adapter that breaks this does not fail loudly: it produces traces that
 //! replay into a different run, and the tool's one promise stops being true.
 
+#[cfg(feature = "http")]
+pub mod http;
 #[cfg(feature = "nats")]
 pub mod nats;
 #[cfg(feature = "postgres")]
@@ -37,6 +39,7 @@ pub mod postgres;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -126,6 +129,7 @@ impl Forks {
 pub struct ProxyContext {
     scheduler: Scheduler,
     forks: Forks,
+    connections: AtomicU64,
     /// Where the real dependency is, as `host:port`.
     pub upstream: String,
     pub events: EventSink,
@@ -142,10 +146,22 @@ impl ProxyContext {
         Self {
             scheduler,
             forks: Forks::default(),
+            connections: AtomicU64::new(0),
             upstream: upstream.into(),
             events,
             cancel,
         }
+    }
+
+    /// The next connection, numbered in the order it was accepted.
+    ///
+    /// Shared machinery rather than a counter in each adapter, because the
+    /// number is half of what a fork is looked up by on replay. Not a race
+    /// despite the atomic: an adapter numbers connections in its accept loop,
+    /// which is one task, and an adapter that numbered them anywhere else would
+    /// have made the ordering the OS's to decide.
+    pub fn next_connection(&self) -> ConnectionId {
+        ConnectionId(self.connections.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
     /// Reaches a fork and takes the answer.
