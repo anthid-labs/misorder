@@ -458,6 +458,8 @@ first-time user gets a caught bug before learning what this tool is.
 | `no_commit_after_error`                  | postgres   | works   |
 | `no_query_outside_transaction`           | postgres   | planned |
 | `set_local_role_survives_pooler`         | postgres   | planned |
+| `every_command_gets_a_reply`             | redis      | works   |
+| `lock_released_by_owner`                 | redis      | works   |
 | `every_request_reaches_terminal_state`   | http       | works   |
 | `idempotent_retry_returns_same_response` | http       | works   |
 | `eventually_quiescent`                   | any        | works   |
@@ -608,8 +610,13 @@ language — has a stable surface to build on.
 ## Not done
 
 - **The NATS and Postgres wire adapters.** The seam is defined and the fault
-  vocabulary is complete; the codecs are not written. The HTTP one is:
-  `proxy::http` speaks HTTP/1.1 and asks at every fork.
+  vocabulary is complete; the codecs are not written. The HTTP and Redis ones
+  are: `proxy::http` speaks HTTP/1.1 and `proxy::redis` speaks RESP, and both
+  ask at every fork.
+- **Redis pub/sub.** After `SUBSCRIBE` the server sends messages no command
+  asked for, which breaks the one-reply-per-command pairing the adapter and its
+  invariants rest on. It is refused with a clear message rather than forwarded
+  and quietly mis-paired.
 - **Egress HTTP.** The ingress placement is wired: the workload posts through
   the proxy to your service. The other direction — your service calling a vendor
   through the proxy — works when driven as a library, but a scenario cannot

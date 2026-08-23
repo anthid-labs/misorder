@@ -32,9 +32,13 @@ all-features = true
 # kills the community contribution that is the only way the long tail of
 # vendors ever gets covered.
 [features]
-default = ["nats", "postgres", "http"]
+default = ["nats", "postgres", "redis", "http"]
 nats = ["dep:async-nats"]
 postgres = ["dep:tokio-postgres"]
+# No client library. A proxy speaks the wire protocol itself, and RESP is
+# small enough that a dependency here would buy a type for a value this
+# adapter never constructs.
+redis = []
 http = []
 
 [dependencies]

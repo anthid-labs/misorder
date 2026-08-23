@@ -26,6 +26,8 @@ pub mod http;
 pub mod nats;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+#[cfg(feature = "redis")]
+pub mod redis;
 pub mod universal;
 
 use crate::error::{Error, Result};
@@ -98,6 +100,18 @@ pub const REGISTRY: &[Entry] = &[
         status: Status::Planned,
     },
     Entry {
+        name: "every_command_gets_a_reply",
+        dependency: "redis",
+        describe: "every command that reached the server got a reply",
+        status: Status::Implemented,
+    },
+    Entry {
+        name: "lock_released_by_owner",
+        dependency: "redis",
+        describe: "a key taken with SET NX is not deleted by a client that no longer holds it",
+        status: Status::Implemented,
+    },
+    Entry {
         name: "every_request_reaches_terminal_state",
         dependency: "http",
         describe: "every accepted request gets a response or an explicit failure",
@@ -166,6 +180,10 @@ pub fn build(spec: &InvariantSpec) -> Result<Box<dyn Invariant>> {
         }
         #[cfg(feature = "postgres")]
         "no_commit_after_error" => Ok(Box::new(postgres::NoCommitAfterError::default())),
+        #[cfg(feature = "redis")]
+        "every_command_gets_a_reply" => Ok(Box::new(redis::EveryCommandGetsAReply::default())),
+        #[cfg(feature = "redis")]
+        "lock_released_by_owner" => Ok(Box::new(redis::LockReleasedByOwner::default())),
         #[cfg(feature = "http")]
         "every_request_reaches_terminal_state" => {
             Ok(Box::new(http::EveryRequestReachesTerminalState::default()))

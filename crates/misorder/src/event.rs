@@ -76,6 +76,7 @@ impl Observed {
 pub enum Event {
     Nats(NatsEvent),
     Postgres(PostgresEvent),
+    Redis(RedisEvent),
     Http(HttpEvent),
     Lifecycle(Lifecycle),
 }
@@ -90,10 +91,48 @@ impl Event {
         match self {
             Event::Nats(_) => Some("nats"),
             Event::Postgres(_) => Some("postgres"),
+            Event::Redis(_) => Some("redis"),
             Event::Http(_) => Some("http"),
             Event::Lifecycle(_) => None,
         }
     }
+}
+
+/// Redis, over RESP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedisEvent {
+    /// A command that actually reached the server.
+    ///
+    /// Only once it has been written upstream. A command the schedule dropped
+    /// is never observed at all, for the same reason a dropped HTTP request is
+    /// not: `every_command_gets_a_reply` would otherwise report the harness's
+    /// own fault as the service's.
+    Command {
+        /// Upper-cased, so an invariant matches `SET` without caring that the
+        /// client sent `set`. Redis command names are case-insensitive and
+        /// clients disagree about which case they use.
+        name: String,
+        /// The arguments as sent, first one usually the key.
+        args: Vec<Bytes>,
+        /// Which command this was in the order the client sent them on this
+        /// connection, counting from zero.
+        ///
+        /// Emission order is the order the server saw them, so this and that
+        /// are the two halves of a reordering. Without it a pipeline of six
+        /// `GET`s says nothing about which one moved.
+        order: u64,
+    },
+    /// A reply the server actually produced.
+    Reply {
+        /// A `-ERR` style error reply. Kept as a flag rather than a variant
+        /// because everything else about an error reply is the same shape.
+        error: bool,
+        /// The scalar payload for the kinds that have one - simple string,
+        /// error, integer, bulk string. `None` for arrays, maps and nulls,
+        /// which no built-in reads.
+        value: Option<Bytes>,
+    },
+    ConnectionClosed,
 }
 
 /// NATS and JetStream.

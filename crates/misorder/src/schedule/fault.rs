@@ -42,6 +42,13 @@ pub enum FaultKind {
     ConnectionDrop,
 
     /// Let a later in-flight message overtake an earlier one.
+    ///
+    /// Applies wherever two things can be in flight at once, which includes
+    /// statements: Redis clients pipeline as a matter of course and Postgres's
+    /// extended query protocol allows it, so two commands sent without waiting
+    /// can reach the server in either order. A fault table that reached only
+    /// deliveries and responses would leave that ordering unexplored while a
+    /// scenario naming `reorder` read as though it covered it.
     Reorder,
 
     /// Delay a message without losing it.
@@ -106,12 +113,64 @@ impl FaultKind {
                     | PointKind::Statement
                     | PointKind::Response
             ),
-            FaultKind::Reorder => matches!(point, PointKind::Deliver | PointKind::Response),
+            FaultKind::Reorder => matches!(
+                point,
+                PointKind::Deliver | PointKind::Statement | PointKind::Response
+            ),
             FaultKind::Delay => point != PointKind::Connection,
             FaultKind::CorruptFrame => matches!(point, PointKind::Deliver | PointKind::Response),
             FaultKind::HoldStatement => point == PointKind::Statement,
         }
     }
+}
+
+/// Which fork kinds a protocol's adapter reaches.
+///
+/// Explicit because the scenario validator needs it and inferring it would mean
+/// guessing. A fault that can never fire in a given scenario is refused rather
+/// than ignored, and getting *that* wrong in the strict direction is worse than
+/// the fault being a no-op: it stops someone writing a scenario that would have
+/// worked.
+///
+/// Adding an adapter adds a line here, and forgetting to shows up immediately -
+/// every fault it could have carried is refused as unreachable.
+pub fn fork_kinds(protocol: &str) -> &'static [PointKind] {
+    match protocol {
+        "nats" => &[PointKind::Connection, PointKind::Deliver, PointKind::Ack],
+        "postgres" => &[
+            PointKind::Connection,
+            PointKind::Statement,
+            PointKind::Response,
+        ],
+        "redis" => &[
+            PointKind::Connection,
+            PointKind::Statement,
+            PointKind::Response,
+        ],
+        "http" => &[
+            PointKind::Connection,
+            PointKind::Deliver,
+            PointKind::Response,
+        ],
+        _ => &[],
+    }
+}
+
+/// Every protocol whose adapter reaches a fork this fault applies at.
+///
+/// What a scenario has to declare for the fault to be able to fire, in the
+/// order they are listed above. Used to turn "this can never fire" into a
+/// sentence naming what to add, which is the difference between an error
+/// someone can act on and one they have to go and read the source for.
+pub fn protocols_for(fault: FaultKind) -> Vec<&'static str> {
+    ["nats", "postgres", "redis", "http"]
+        .into_iter()
+        .filter(|protocol| {
+            fork_kinds(protocol)
+                .iter()
+                .any(|kind| fault.applies_at(*kind))
+        })
+        .collect()
 }
 
 impl std::fmt::Display for FaultKind {
@@ -128,6 +187,18 @@ mod tests {
     fn ack_faults_only_apply_to_acks() {
         assert!(FaultKind::SwallowAck.applies_at(PointKind::Ack));
         assert!(!FaultKind::SwallowAck.applies_at(PointKind::Deliver));
+    }
+
+    /// Two pipelined statements can reach the server in either order, so the
+    /// fault that swaps them has to be able to fire there. Without this a
+    /// Redis or Postgres scenario permitting `reorder` explores no reorderings
+    /// at all, and reads as thorough while doing it.
+    #[test]
+    fn statements_can_be_reordered_because_clients_pipeline_them() {
+        assert!(FaultKind::Reorder.applies_at(PointKind::Statement));
+        assert!(FaultKind::Reorder.applies_at(PointKind::Deliver));
+        assert!(FaultKind::Reorder.applies_at(PointKind::Response));
+        assert!(!FaultKind::Reorder.applies_at(PointKind::Connection));
     }
 
     #[test]

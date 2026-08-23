@@ -35,6 +35,8 @@ pub mod http;
 pub mod nats;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+#[cfg(feature = "redis")]
+pub mod redis;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

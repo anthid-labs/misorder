@@ -133,7 +133,16 @@ flowchart LR
     pg["postgres"] --> pc["Connection"]
     pg --> ps["Statement"]
     pg --> pr["Response"]
+    rd["redis"] --> rc["Connection"]
+    rd --> rs["Statement"]
+    rd --> rr["Response"]
 ```
+
+Redis was the test of that claim, and it passed: a whole new protocol needed no
+new `PointKind` and no new fault. It did move one line — `reorder` now applies at
+`Statement` as well, because Redis clients pipeline and two commands really can
+be in flight at once. A table that reached only deliveries and responses would
+have left that unexplored while a scenario naming `reorder` read as covering it.
 
 Eight user-facing faults collapse into six decisions, because faults name
 **intent** and decisions name **mechanism**. `swallow_ack` and `redelivery` are

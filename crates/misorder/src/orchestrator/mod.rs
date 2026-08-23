@@ -29,6 +29,12 @@ use std::collections::BTreeMap;
 use crate::error::Result;
 use crate::scenario::file::{Deps, RunSettings};
 
+/// Stands in for a container id on a dependency misorder did not start.
+///
+/// A sentinel rather than an `Option`, because every other field means the same
+/// thing either way and the teardown path only has to know not to stop it.
+pub const EXTERNAL: &str = "external";
+
 /// A running dependency, and how to reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency {
@@ -71,6 +77,25 @@ impl Environment {
             return Ok(Self::default());
         }
 
+        // A dependency somebody else started needs nothing from the daemon
+        // either. `docker compose up redis` and a scenario pointing at it is
+        // how most people already run their integration tests, and it is the
+        // whole of what starting containers would buy them.
+        let external = deps.external();
+
+        if external.len() == deps.declared().len() {
+            return Ok(Self {
+                dependencies: external
+                    .into_iter()
+                    .map(|(name, address)| Dependency {
+                        name,
+                        address: address.to_string(),
+                        container_id: EXTERNAL.to_string(),
+                    })
+                    .collect(),
+            });
+        }
+
         let client = docker::Client::connect().await?;
 
         client.start_declared(deps, settings).await
@@ -100,6 +125,13 @@ impl Environment {
     /// false failure, and those are the expensive kind.
     pub async fn stop(self) {
         for dependency in &self.dependencies {
+            // Not ours to stop. Killing a Redis somebody's compose file brought
+            // up, because a scenario happened to point at it, would be a run
+            // with a side effect outside itself.
+            if dependency.container_id == EXTERNAL {
+                continue;
+            }
+
             tracing::debug!(
                 name = dependency.name,
                 container = %dependency.container_id,
@@ -159,6 +191,26 @@ mod tests {
             .expect("no dependencies means nothing to start");
 
         assert!(environment.dependencies().is_empty());
+    }
+
+    /// A declared dependency that is already running needs no daemon, which is
+    /// what lets a Redis scenario run against `docker compose up redis` on a
+    /// machine where misorder cannot start containers at all.
+    #[tokio::test]
+    async fn an_external_dependency_never_reaches_the_daemon() {
+        let deps = Deps {
+            redis: Some(crate::scenario::file::Redis {
+                address: Some("127.0.0.1:6379".to_string()),
+                image: None,
+            }),
+            ..Deps::default()
+        };
+
+        let environment = Environment::start(&deps, &RunSettings::default())
+            .await
+            .expect("an already-running dependency needs nothing started");
+
+        assert_eq!(environment.address_of("redis"), Some("127.0.0.1:6379"));
     }
 
     #[test]

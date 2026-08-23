@@ -20,7 +20,10 @@ use crate::orchestrator::process::Service;
 use crate::proxy::EventSink;
 #[cfg(feature = "http")]
 use crate::proxy::http::HttpAdapter;
-#[cfg(feature = "http")]
+// Any adapter needs these, not just the HTTP one. Gated on the set rather than
+// unconditionally, because a build with no protocol feature binds no adapter
+// and would carry an unused import.
+#[cfg(any(feature = "http", feature = "redis"))]
 use crate::proxy::{Adapter, ProxyContext};
 use crate::report::Reproducer;
 use crate::report::run::{
@@ -383,7 +386,9 @@ struct Running {
     service_address: Option<std::net::SocketAddr>,
     /// Where the workload driver posts, when an ingress proxy was bound.
     ingress: Option<std::net::SocketAddr>,
-    proxy: Option<tokio::task::JoinHandle<Result<()>>>,
+    /// Every proxy serving this run: one per declared dependency, plus the
+    /// ingress one when the workload posts.
+    proxies: Vec<tokio::task::JoinHandle<Result<()>>>,
 }
 
 impl Running {
@@ -487,7 +492,7 @@ impl Runner {
         // to ask it what its state ended up as.
         cancel.cancel();
 
-        if let Some(proxy) = running.proxy.take() {
+        for proxy in std::mem::take(&mut running.proxies) {
             let _ = proxy.await;
         }
 
@@ -556,13 +561,15 @@ impl Runner {
         started: Instant,
         running: &mut Running,
     ) -> Result<()> {
-        for system in &self.scenario.system {
-            // Nothing to inject yet. This is where a proxied dependency's
-            // address arrives for an egress placement — the service reaches its
-            // database through the proxy by reading an ordinary environment
-            // variable, which is the whole "no SDK" stance in one mechanism.
-            let injected: Vec<(String, String)> = Vec::new();
+        // Egress proxies first, because the service reads their addresses out
+        // of its environment at startup. This is the "no SDK" stance in one
+        // mechanism: the service reaches Redis through a different value in
+        // `REDIS_URL` and is never told why.
+        let injected = self
+            .start_egress(&mut running.proxies, scheduler, events, cancel)
+            .await?;
 
+        for system in &self.scenario.system {
             let mut service = Service::start(system, &injected, self.service_output).await?;
 
             events.emit_lifecycle(
@@ -582,12 +589,13 @@ impl Runner {
 
         events.emit_lifecycle(started.elapsed(), Event::Lifecycle(Lifecycle::SystemReady));
 
+        // Ingress after the service is listening, because it forwards there.
         let ingress = self
             .start_ingress(running.service_address, scheduler, events, cancel)
             .await?;
 
         if let Some((address, task)) = ingress {
-            running.proxy = Some(task);
+            running.proxies.push(task);
             running.ingress = Some(address);
         }
 
@@ -597,6 +605,65 @@ impl Runner {
             .await?;
 
         self.await_quiescence(events, started).await
+    }
+
+    /// Binds one proxy per declared dependency, and reports the environment
+    /// the service needs to reach them.
+    ///
+    /// Egress: the service is the one connecting, so the proxy stands where the
+    /// dependency would be and the service is pointed at it through ordinary
+    /// configuration. It imports nothing and is not told this is happening.
+    ///
+    /// Only dependencies with an `address` today. Starting a container is not
+    /// implemented, and a dependency somebody else brought up is the case that
+    /// actually needs no daemon here.
+    async fn start_egress(
+        &self,
+        proxies: &mut Vec<tokio::task::JoinHandle<Result<()>>>,
+        scheduler: &Scheduler,
+        events: &EventSink,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<(String, String)>> {
+        let mut injected = Vec::new();
+
+        for (protocol, upstream) in self.scenario.deps.external() {
+            // Annotated because a build with no protocol features has only the
+            // diverging arm below, and the match then has no type to infer.
+            let endpoint: crate::proxy::Endpoint = match protocol {
+                #[cfg(feature = "redis")]
+                "redis" => {
+                    let mut adapter = crate::proxy::redis::RedisAdapter::new();
+                    let endpoint = adapter.bind(upstream).await?;
+
+                    let context = ProxyContext::new(
+                        scheduler.clone(),
+                        upstream.to_string(),
+                        events.clone(),
+                        cancel.clone(),
+                    );
+
+                    proxies.push(tokio::spawn(async move { adapter.serve(context).await }));
+
+                    endpoint
+                }
+                other => {
+                    return Err(Error::Unsupported(format!(
+                        "`{other}` cannot be proxied yet: its wire codec is not written"
+                    )));
+                }
+            };
+
+            tracing::debug!(
+                protocol,
+                upstream,
+                listen = %endpoint.listen,
+                "proxying a declared dependency"
+            );
+
+            injected.extend(endpoint.env);
+        }
+
+        Ok(injected)
     }
 
     /// Binds the ingress HTTP proxy, when the workload has anything to post.
@@ -729,6 +796,26 @@ impl Runner {
     {
         let started = Instant::now();
         let started_at = run::now_rfc3339();
+
+        // Said once, loudly, because it undercuts the property the whole tool
+        // rests on. A dependency somebody else started is not reset between
+        // seeds, so what seed 41 finds can depend on what seed 40 left behind -
+        // and "same seed, same run" stops being true across a sweep even though
+        // it still holds for a single one.
+        //
+        // Not fixed by wiping it: that is somebody's Redis, and a test harness
+        // that flushed it because a scenario pointed at it would be a worse
+        // problem than the one it solved. Give a sweep an instance of its own,
+        // or a key prefix per seed.
+        let external = self.scenario.deps.external();
+
+        if !external.is_empty() {
+            tracing::warn!(
+                dependencies = ?external.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+                "this sweep runs against dependencies it did not start, so state carries between \
+                 seeds and one seed's result can depend on another's"
+            );
+        }
 
         let mine: Vec<u64> = seeds
             .iter()

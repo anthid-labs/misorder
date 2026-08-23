@@ -32,11 +32,11 @@
 use async_trait::async_trait;
 
 use crate::error::{Error, Result};
-#[cfg(feature = "postgres")]
+// Unconditional: the HTTP check needs these in every build, because it asks the
+// service under test rather than a dependency and so is not tied to a protocol
+// feature at all. They were gated when the SQL check was the only user.
 use crate::event::Observed;
-use crate::invariant::Invariant;
-#[cfg(feature = "postgres")]
-use crate::invariant::{CheckContext, Violation};
+use crate::invariant::{CheckContext, Invariant, Violation};
 use crate::scenario::file::{CheckKind, Expect, InvariantSpec};
 
 /// Constructs a user invariant from its scenario block.

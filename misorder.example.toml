@@ -251,6 +251,20 @@ builtin = "eventually_quiescent"
 #   no_query_outside_transaction         (specified, not implemented yet)
 #   set_local_role_survives_pooler       (specified, not implemented yet)
 #
+# Redis:
+#   every_command_gets_a_reply
+#     every command that reached the server got a reply. A command that is
+#     neither answered nor explicitly failed leaves the client unable to say
+#     whether it happened, and for a DECRBY on an inventory count neither
+#     retrying nor not retrying is safe.
+#   lock_released_by_owner
+#     a key taken with SET NX is not deleted by a client that no longer holds
+#     it. The canonical Redis lock is four lines and the canonical mistake is
+#     releasing it with DEL: the lock expires while you are still working,
+#     somebody else takes it, and your DEL frees theirs. Redis's own docs say
+#     to release with a script that compares the token. This fires when nobody
+#     did.
+#
 # HTTP:
 #   every_request_reaches_terminal_state
 #     every accepted request gets a response or an explicit failure. A request

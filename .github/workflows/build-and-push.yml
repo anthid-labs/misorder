@@ -74,7 +74,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo check -p misorder --no-default-features
-          for feature in nats postgres http; do
+          for feature in nats postgres redis http; do
             echo "::group::misorder --features $feature"
             cargo check -p misorder --no-default-features --features "$feature"
             echo "::endgroup::"

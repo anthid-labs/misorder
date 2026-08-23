@@ -223,6 +223,9 @@ pub struct Deps {
 
     #[serde(default)]
     pub postgres: Option<Postgres>,
+
+    #[serde(default)]
+    pub redis: Option<Redis>,
 }
 
 impl Deps {
@@ -236,8 +239,28 @@ impl Deps {
         if self.postgres.is_some() {
             names.push("postgres");
         }
+        if self.redis.is_some() {
+            names.push("redis");
+        }
 
         names
+    }
+
+    /// Dependencies this scenario expects to already be running.
+    ///
+    /// A declared dependency with an `address` is one somebody else started -
+    /// `docker compose up`, a shared instance, a managed one. misorder puts a
+    /// proxy in front of it and starts nothing.
+    pub fn external(&self) -> Vec<(&'static str, &str)> {
+        let mut found = Vec::new();
+
+        if let Some(redis) = &self.redis
+            && let Some(address) = &redis.address
+        {
+            found.push(("redis", address.as_str()));
+        }
+
+        found
     }
 }
 
@@ -328,6 +351,38 @@ pub struct Postgres {
 
 fn default_database() -> String {
     "misorder".to_string()
+}
+
+/// Redis, reached through the proxy.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Redis {
+    /// `host:port` of a Redis that is already running.
+    ///
+    /// Required today, because starting containers is not implemented yet.
+    /// That is deliberately not a placeholder. A dependency somebody else
+    /// brought up, with `docker compose up redis` or as a shared instance, is
+    /// how most people already run their integration tests, and a scenario that
+    /// can point at one needs no daemon of its own.
+    ///
+    /// The service under test never sees this address. It gets the proxy's,
+    /// through `REDIS_URL`, and that separation is what makes the fault
+    /// injection unavoidable rather than opt-in.
+    ///
+    /// # A sweep against one of these is not isolated
+    ///
+    /// misorder did not start it, so it is not reset between seeds. Whatever
+    /// seed 40 wrote is still there for seed 41, and a run's outcome can then
+    /// depend on a run before it — which is exactly the property `mis fuzz`
+    /// exists to rule out. A single `mis run` is unaffected; a sweep should
+    /// have an instance of its own, or the scenario should key everything it
+    /// touches by seed. `mis fuzz` warns when it sees one of these.
+    #[serde(default)]
+    pub address: Option<String>,
+
+    /// Overrides the pinned default, once starting one is implemented.
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 /// One step of the workload driven at the service.
@@ -652,26 +707,48 @@ impl Scenario {
         }
 
         // Faults that can never fire are refused rather than ignored. A
-        // scenario permitting `hold_statement` with no Postgres is not a
-        // harmless no-op: it reads as covering an interleaving it never
-        // explores.
-        for fault in &self.faults.enabled {
-            let needs = match fault {
-                FaultKind::AckTimeout | FaultKind::SwallowAck | FaultKind::Redelivery => {
-                    Some("nats")
-                }
-                FaultKind::HoldStatement => Some("postgres"),
-                _ => None,
-            };
+        // scenario permitting `hold_statement` with nothing that has statements
+        // is not a harmless no-op: it reads as covering an interleaving it
+        // never explores.
+        //
+        // Satisfiable by *any* declared dependency whose adapter reaches a fork
+        // the fault applies at, rather than by one named protocol. `reorder`
+        // needs something with two things in flight, and Redis, Postgres and an
+        // HTTP ingress all qualify; a table that named a single owner per fault
+        // would refuse three scenarios out of four that were perfectly valid.
+        let reachable: Vec<crate::trace::PointKind> = self
+            .deps
+            .declared()
+            .into_iter()
+            .flat_map(|protocol| crate::schedule::fault::fork_kinds(protocol).iter().copied())
+            .chain(
+                // An HTTP ingress needs no declared dependency: the proxy sits
+                // in front of the service itself.
+                self.workload
+                    .iter()
+                    .any(|step| step.post.is_some())
+                    .then_some(crate::schedule::fault::fork_kinds("http").iter().copied())
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect();
 
-            if let Some(dependency) = needs
-                && !self.deps.declared().contains(&dependency)
-            {
-                return Err(Error::Scenario(format!(
-                    "fault `{fault}` needs a [deps.{dependency}] block, which this scenario \
-                     does not declare"
-                )));
+        for fault in &self.faults.enabled {
+            if reachable.iter().any(|kind| fault.applies_at(*kind)) {
+                continue;
             }
+
+            let wanted: Vec<String> = crate::schedule::fault::protocols_for(*fault)
+                .into_iter()
+                .map(|protocol| format!("[deps.{protocol}]"))
+                .collect();
+
+            return Err(Error::Scenario(format!(
+                "fault `{fault}` can never fire in this scenario: nothing it declares reaches a \
+                 fork it applies at. Add one of {}, or a `post` workload step for the http \
+                 ingress",
+                wanted.join(", ")
+            )));
         }
 
         let workload = self
