@@ -17,6 +17,15 @@
 //! The variable name is the scenario's to pick, because there is no convention
 //! worth guessing at — `PORT` for most things, `HTTP_PORT`, `LISTEN_ADDR` for
 //! others.
+//!
+//! # What else is injected
+//!
+//! `MISORDER_SEED`, always. A service sharing a dependency with other runs -
+//! sixteen seeds in parallel against one Redis - can prefix what it touches
+//! with it and stop colliding with the other fifteen. Ignoring it leaves the
+//! service exactly as isolated as it was, which is the point: the harness
+//! offers the one fact only it has and does not require anything to be done
+//! with it.
 
 use std::net::SocketAddr;
 use std::process::Stdio;

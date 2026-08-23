@@ -565,9 +565,23 @@ impl Runner {
         // of its environment at startup. This is the "no SDK" stance in one
         // mechanism: the service reaches Redis through a different value in
         // `REDIS_URL` and is never told why.
-        let injected = self
+        let mut injected = self
             .start_egress(&mut running.proxies, scheduler, events, cancel)
             .await?;
+
+        // Which run this is, so a service sharing a dependency with other runs
+        // can keep out of their way.
+        //
+        // Sixteen seeds in parallel against one Redis is sixteen services
+        // writing the same keys, and the results are then about the collision
+        // rather than about the ordering. A service that prefixes what it
+        // touches with this is isolated again; one that ignores it is exactly as
+        // isolated as it was. That is the right shape for a harness: offer the
+        // one fact only the harness has, and let the service decide.
+        injected.push((
+            "MISORDER_SEED".to_string(),
+            scheduler.trace().seed.to_string(),
+        ));
 
         for system in &self.scenario.system {
             let mut service = Service::start(system, &injected, self.service_output).await?;

@@ -1,0 +1,98 @@
+# Two workers, one lock, and the release everybody writes first.
+#
+# The egress worked example: your service calls the dependency, and the proxy
+# stands where the dependency would be.
+#
+#   docker compose -f docker/compose.yaml up -d redis    # or any Redis you have
+#   cargo build --workspace
+#   mis check examples/redis_naive_lock.toml
+#   mis run   examples/redis_naive_lock.toml --seed 1
+#   mis fuzz  examples/redis_naive_lock.toml --seeds 200
+#
+# ── The premise ───────────────────────────────────────────────────────────────
+#
+# The lock is textbook: SET key token NX PX ttl to acquire. The release is
+# DEL key, which is the line Redis's own documentation tells you not to write.
+# It is safe exactly as long as the lock never expires early, and the reason it
+# has a TTL is that it can:
+#
+#   worker A takes the lock
+#   A's work runs long and the TTL expires
+#   worker B finds the lock free and takes it
+#   A finishes and DELs, releasing B's lock
+#   anyone can now take it while B believes it holds it
+#
+# Unperturbed, A finishes well inside the TTL and nothing happens. The bug needs
+# one reply held long enough that A's work outlasts its own lock, which is one
+# decision in misorder's vocabulary.
+#
+# ── What is deliberately not here ─────────────────────────────────────────────
+#
+# No image, no container. `[deps.redis]` names an address, so this points at a
+# Redis somebody else started - compose, a shared instance, the one already on
+# your laptop - and misorder starts nothing. Starting containers is not
+# implemented yet, and for this scenario there is nothing it would add.
+#
+# One sharp edge that follows from that: a *sweep* against a Redis misorder did
+# not start is not isolated. Whatever seed 40 wrote is still there for seed 41.
+# `mis fuzz` warns when it sees one. Give a sweep an instance of its own.
+
+name = "redis_naive_lock"
+
+[[system]]
+run = "./target/debug/redis-worker-demo"
+
+# It makes no outbound traffic before it is asked to, and it is asked to
+# immediately: there is no readiness signal to wait for that is not the work
+# itself.
+ready_when = "immediate"
+
+# Already running. misorder binds a proxy in front of it and sets REDIS_URL on
+# the service to the proxy's address, so every command crosses a fork. The
+# service reads an ordinary variable and is never told why.
+[deps.redis]
+address = "127.0.0.1:6379"
+
+[run]
+timeout = "20s"
+quiesce_after = "150ms"
+
+# ── The workload ──────────────────────────────────────────────────────────────
+#
+# One wait, and nothing else. The traffic here comes from the service itself
+# rather than from a driver: it is a worker, not an endpoint, so there is
+# nothing to post at it.
+#
+# The wait is what gives it room to finish. Quiescence is an idle window today
+# rather than real idleness detection, so a run with no workload lasts exactly
+# `quiesce_after` and would tear the proxy down while the service was still
+# mid-command. Real quiescence detection is Phase 3 and this line goes away with
+# it; until then, this is the honest version of "wait for the worker to be
+# done", and it is generous enough to cover the delays the schedule may inject.
+[[workload]]
+wait = "900ms"
+
+# ── The faults ────────────────────────────────────────────────────────────────
+#
+# `delay` is the one that matters and the only one required: hold A's reply past
+# its own TTL and the lock expires under it. `connection_drop` and `reorder` are
+# permitted so the reproducer can say they were not needed, which is worth as
+# much as naming the one that was.
+[faults]
+enabled = ["delay", "reorder", "connection_drop"]
+
+# ── What must be true ─────────────────────────────────────────────────────────
+
+# Ships with the adapter and takes no input: the whole lock exchange crosses the
+# wire, so the proxy sees a client release a lock it no longer owns without
+# knowing anything about this service.
+[[invariants]]
+builtin = "lock_released_by_owner"
+
+# A command that is neither answered nor explicitly failed leaves the client
+# unable to say whether it happened.
+[[invariants]]
+builtin = "every_command_gets_a_reply"
+
+[[invariants]]
+builtin = "eventually_quiescent"

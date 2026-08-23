@@ -14,13 +14,21 @@ combinations for the weak points unknown until a production outage.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Status: the HTTP loop closes; the other two protocols do not yet.** An HTTP
-scenario runs end to end today — `mis run` starts your service, puts the proxy
-in front of it, drives the workload through it, checks the invariants and hands
-back a shrunk reproducer, with no Docker involved. What is not done: the NATS
-and Postgres wire adapters, and the container orchestration the scenarios
-needing them would use. Those report `not supported yet` rather than pretending.
-See [Roadmap](#roadmap).
+**Status: the loop closes for HTTP and Redis. NATS and Postgres do not yet.**
+`mis run` starts your service, puts a proxy between it and everything it talks
+to, drives the workload through that, checks the invariants and hands back a
+shrunk reproducer — with no Docker involved, in either direction:
+
+- **Ingress**, where the vendor calls you. A webhook endpoint, with the workload
+  driver standing in for Stripe.
+- **Egress**, where you call the dependency. Your service reaches Redis through
+  the proxy by reading a different value out of `REDIS_URL`.
+
+What is not done: the NATS and Postgres wire codecs, and the container
+orchestration a scenario needing them would use. A dependency you started
+yourself — `docker compose up redis` — is declared with an address and needs
+neither. Everything unimplemented reports `not supported yet` rather than
+pretending. See [Roadmap](#roadmap) and [Not done](#not-done).
 
 ## The words this README uses
 
@@ -199,37 +207,36 @@ misorder gives it and behaves normally, so a Go service and a Rust service adopt
 this identically. Cost scales with protocols, not with languages.
 
 ```toml
-name = "dead_letter_no_redelivery"
+name = "redis_naive_lock"
 
 [[system]]
-run = "./target/debug/ledger"
-ready_when = "nats_subscription_active"
+run = "./target/debug/worker"
+ready_when = "immediate"
 
-[[deps.nats.streams]]
-name = "LEDGER"
-subjects = ["ledger.>"]
-max_deliver = 5
-ack_wait = "30s"
-discard = "old"
-
-[deps.postgres]
-migrations = "./migrations"
-
-[[workload]]
-publish = "ledger.org.org_1.account.acct_1.order"
-payload = { order_id = "ord_1", kind = "fill", qty = 100 }
+# Already running - `docker compose up redis`. misorder puts a proxy in front of
+# it and points the service at that instead, through REDIS_URL.
+[deps.redis]
+address = "127.0.0.1:6379"
 
 [faults]
-enabled = ["ack_timeout", "redelivery", "connection_drop", "reorder"]
+enabled = ["delay", "reorder", "connection_drop"]
+
+# Ships with the adapter and takes no input from you: the whole lock exchange
+# crosses the wire, so the proxy can see a client release a lock it no longer
+# owns without knowing anything about your service.
+[[invariants]]
+builtin = "lock_released_by_owner"
 
 [[invariants]]
-builtin = "no_infinite_redelivery"
-window = "5m"
-same_payload_max = 10
+name = "no_order_processed_twice"
+check = "http"
+query = "/checks/duplicate_fulfilment"
+expect = "empty"
 ```
 
-That is the only artifact you write. [`misorder.example.toml`](misorder.example.toml)
-documents every key.
+That is the only artifact you write, and it runs as written.
+[`misorder.example.toml`](misorder.example.toml) documents every key, including
+the NATS and Postgres blocks whose adapters are still being built.
 
 ## Install
 
@@ -313,6 +320,45 @@ Reproduce it, then commit it:
 That second command runs in under a second on every pull request, and either
 reproduces or does not.
 
+### The other direction
+
+That one is **ingress** — the vendor calls you. The egress example is a worker
+taking a Redis lock the way everybody writes it first, and it needs a Redis you
+already have:
+
+```bash
+mis fuzz examples/redis_naive_lock.toml --seeds 60
+```
+
+```text
+MINIMAL REPRODUCER: redis_naive_lock
+seed 7, 1 of 2 decisions
+
+  1. [   212ms] conn:1 delay statement by 160ms (GET)
+
+  lock_released_by_owner: conn:1 sent DEL on a key currently held by conn:2 under
+  a different token; releasing a lock you no longer own lets two clients into the
+  same critical section. Release with a script that compares the token first.
+
+  Faults 'reorder' and 'connection_drop' were not required.
+```
+
+`SET key token NX PX ttl` to acquire, `DEL key` to release. Hold one reply long
+enough that the work outlasts the lock, and the release frees somebody else's.
+`lock_released_by_owner` ships with the adapter and takes no input from you: the
+whole exchange crosses the wire, so the proxy sees it without knowing anything
+about the service.
+
+The worker reads `REDIS_URL` and is never told it is not talking to Redis.
+[`apps/redis-worker-demo`](apps/redis-worker-demo) is the service;
+[`examples/redis_naive_lock.toml`](examples/redis_naive_lock.toml) is the
+scenario.
+
+There is also a version of the Stripe story with no scenario file at all,
+driving the engine as a library —
+[`crates/misorder/examples/stripe_webhook_ordering.rs`](crates/misorder/examples/stripe_webhook_ordering.rs),
+runnable with `cargo run -p misorder --example stripe_webhook_ordering`.
+
 ## Quick start
 
 ```bash
@@ -338,6 +384,11 @@ own slice from two integers:
 mis fuzz scenario.toml --seeds 100000 --shard 7/64 --report shard-7.json
 ```
 
+A sweep draws a progress bar while it runs, and a second one while it shrinks
+what it found — ten thousand seeds is minutes, and a tool that prints nothing
+for minutes is one people interrupt to check it is alive. It draws only when a
+terminal is attached, so a redirected sweep writes nothing extra.
+
 Output is coloured when a terminal is attached and plain when it is not, so a
 report piped to a file arrives without escape sequences. `--no-color` turns it
 off, `NO_COLOR` turns it off, and `CLICOLOR_FORCE` turns it on for a CI runner
@@ -355,6 +406,24 @@ Exit codes are the thing CI needs, and they are three-valued on purpose:
 Collapsing 1 and 2 means a broken Docker socket looks like a caught bug, someone
 chases it for an hour, and the next real finding gets the same treatment.
 
+## What your service is told
+
+Nothing, beyond its ordinary configuration:
+
+| Variable | When |
+| -------- | ---- |
+| the one you name in `listen_env` | An ingress scenario. misorder picks a free port per run and sets it to that, then binds the proxy in front. |
+| `REDIS_URL`, and one per proxied dependency | The proxy's address, never the dependency's. That separation is what makes the fault injection unavoidable rather than opt-in. |
+| `MISORDER_SEED` | Always. Which run this is. |
+
+The last one is worth a sentence, because ignoring it is a trap. Sixteen seeds
+in parallel against one Redis is sixteen services writing the same keys, and the
+failures a sweep then reports are about the collision rather than about the
+ordering — the most expensive kind of wrong answer a testing tool can give. A
+service that prefixes what it touches with the seed is isolated again; one that
+ignores it is exactly as isolated as it was. That is the right shape for a
+harness: offer the one fact only it has, and stay out of the decision.
+
 ## How it works
 
 Six stages, and the boundaries between them are where the design lives.
@@ -365,8 +434,8 @@ Six stages, and the boundaries between them are where the design lives.
 2. **Environment.** The declared dependencies start as real containers. Real
    Postgres, real NATS. Fidelity is free here and unarguable, and it matters
    more than speed.
-3. **Proxy.** Every connection from the service goes through misorder, which
-   speaks the real wire protocol in both directions. This is where all
+3. **Proxy.** Every connection between the service and something else goes
+   through misorder, which speaks the real wire protocol in both directions. This is where all
    nondeterminism gets injected: drop the connection, delay the response,
    reorder two in-flight replies, swallow an ack, hold statement B until
    statement A commits.
@@ -520,7 +589,8 @@ schedule that runs in under a second and either reproduces or does not.
 | ----------------------- | ------------------------------------------------------------- |
 | `crates/misorder`       | The library: scenario, orchestrator, proxy, schedule, trace, invariants, shrinker. |
 | `apps/misorder-cli`     | The `mis` binary: argument parsing, logging setup, exit codes. |
-| `apps/billing-demo`     | The service under test in the worked example. Wrong on purpose. |
+| `apps/billing-demo`     | The service under test in the ingress example. Wrong on purpose. |
+| `apps/redis-worker-demo`| The service under test in the egress example. Also wrong on purpose. |
 | `examples/`             | Scenario files, including the one in this README, and a corpus. |
 | `docker/`               | Dockerfile and a compose example.                              |
 | `docs/ARCHITECTURE.md`  | How the components fit, with a flowchart for each.             |
@@ -543,18 +613,48 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
-The suite is hermetic: no Docker, no network. That is possible because the
-interesting logic is pure. The shrinker is tested against a synthetic oracle
+The suite needs no Docker and nothing off the machine. That is possible because
+the interesting logic is pure: the shrinker is tested against a synthetic oracle
 that fails only when a specific set of decisions survives, so the search is
-verified without running a single container. The scheduler is tested by
+verified without running a single container, and the scheduler is tested by
 asserting that a fork gets the same answer however many other forks came first,
-which is the property the whole tool rests on.
+which is the property the whole tool rests on. The adapters bind loopback
+sockets and talk to a few dozen lines of fake server, which is enough to test
+what they decide.
+
+One more thing CI checks, and it is the one that fails for somebody else rather
+than for you:
+
+```bash
+for feature in nats postgres redis http; do
+  cargo check -p misorder --no-default-features --features "$feature"
+done
+```
+
+One feature per protocol, and a downstream embedder may enable exactly one. A
+missing `#[cfg]` compiles fine with the default set and breaks only for the
+person who turned the others off, which is the worst place to find it.
 
 ## Roadmap
 
 **Phase 1, the loop.** One service, real dependencies, seeded faults, a failure
 that reproduces, a minimal reproducer. Sellable on its own as reproducible chaos
-testing with shrinking, which nobody ships today. This is what the tree is.
+testing with shrinking, which nobody ships today.
+
+The loop is closed for HTTP and Redis: `mis run` and `mis fuzz` do all of that
+end to end, in both placements, against a service that imports nothing. What is
+left of Phase 1 is protocol coverage — the NATS and Postgres codecs — and
+starting the containers a scenario declares rather than pointing at ones you
+already started.
+
+The next adapter is worth naming, because Redis argued for it. Redis needed no
+new fork kind, no new fault and no new dependency, and it took one line to let
+`reorder` fire at a `Statement` fork. **gRPC is the one that pays twice**: it
+needs HTTP/2, and HTTP/2 is also what makes `reorder` work properly for the
+HTTP adapter, whose current form needs a pipelining client that almost nobody
+writes. Kafka is high value and belongs after the virtual clock, because its
+best failures — rebalance, session timeout, eviction — fire on a timer with no
+frame crossing the wire, which is precisely what a proxy cannot reach.
 
 **Phase 2, fidelity.** Stop guessing what vendors do. Record real sessions in
 passthrough mode, scrub them of everything customer-specific, replay them as
@@ -573,7 +673,9 @@ Stripe as the worked example.
 
 **Phase 3, speed.** Quiescence detection first, because it gates everything: to
 advance a virtual clock safely you have to know the system is idle rather than
-mid-computation. Then the virtual clock, so `ack_wait = "30s"` costs
+mid-computation. It is a heuristic today — an idle window — and deliberately a
+conservative one, because calling quiescence during a 40ms CPU burst would
+manufacture a failure that never happened. Then the virtual clock, so `ack_wait = "30s"` costs
 microseconds. Then a simulated JetStream, which is first among the simulators
 for a specific reason: `ack_wait` fires on the server's own timer with no client
 involved, so a proxy cannot intercept a decision that never crossed the wire.
@@ -609,28 +711,41 @@ language — has a stable surface to build on.
 
 ## Not done
 
-- **The NATS and Postgres wire adapters.** The seam is defined and the fault
-  vocabulary is complete; the codecs are not written. The HTTP and Redis ones
-  are: `proxy::http` speaks HTTP/1.1 and `proxy::redis` speaks RESP, and both
-  ask at every fork.
-- **Redis pub/sub.** After `SUBSCRIBE` the server sends messages no command
-  asked for, which breaks the one-reply-per-command pairing the adapter and its
-  invariants rest on. It is refused with a clear message rather than forwarded
-  and quietly mis-paired.
-- **Egress HTTP.** The ingress placement is wired: the workload posts through
-  the proxy to your service. The other direction — your service calling a vendor
-  through the proxy — works when driven as a library, but a scenario cannot
-  declare an HTTP dependency yet, so there is no `mis run` path to it.
+- **The NATS and Postgres wire codecs.** The seam is defined and the fault
+  vocabulary is complete; the codecs are not written. The other two are:
+  `proxy::http` speaks HTTP/1.1 and `proxy::redis` speaks RESP, and both ask at
+  every fork.
 - **Container orchestration.** `orchestrator::docker` connects to the daemon and
-  reports a clear error; it does not yet start anything. A scenario declaring no
-  dependencies never reaches it, which is why the worked example runs without
-  Docker.
+  reports a clear error; it does not start anything. A scenario that declares no
+  dependencies never reaches it, and one that declares an already-running
+  dependency by `address` does not either — which is why both worked examples
+  run with no daemon.
+- **A sweep against a dependency you started is not isolated.** misorder did not
+  start it, so it is not reset between seeds: what seed 40 wrote is still there
+  for seed 41, and a result can then depend on a run before it. That is exactly
+  the property `mis fuzz` exists to rule out, so it warns when it sees one. A
+  single `mis run` is unaffected. Not fixed by wiping the thing — that is your
+  Redis, and a harness that flushed it because a scenario pointed at it would be
+  a worse problem than the one it solved.
+- **Egress HTTP from a scenario.** Redis proved the egress placement end to end,
+  and the same works for HTTP when the engine is driven as a library. What is
+  missing is a way to *declare* an HTTP dependency in a scenario, so there is no
+  `mis run` path to it.
+- **Redis pub/sub.** After `SUBSCRIBE` the server sends messages no command asked
+  for, which breaks the one-reply-per-command pairing the adapter and its
+  invariants rest on. Refused with a clear message rather than forwarded and
+  quietly mis-paired.
+- **TLS, and HTTP/2.** Both adapters are plaintext. The service under test is on
+  loopback and a vendor's delivery has already been terminated by the time
+  misorder sees it, so neither is in the way yet — but HTTP/2 is what would make
+  `reorder` useful against a real HTTP client, which today needs pipelining that
+  almost nobody does.
 - **Publishing a workload step.** The NATS side of the driver. Posting is
   implemented, and posts go out pipelined on one connection followed by a
   half-close, which is what gives a reorder two requests in flight to swap.
-- **Quiescence detection.** Phase 1 uses an idle window, which is a heuristic.
-  It is deliberately conservative: calling quiescence during a 40ms CPU burst
-  would manufacture a failure that never happened.
+- **Quiescence detection.** An idle window, which is a heuristic. Deliberately a
+  conservative one: calling quiescence during a 40ms CPU burst would manufacture
+  a failure that never happened. It is what gates the virtual clock.
 
 ## Contributing
 
