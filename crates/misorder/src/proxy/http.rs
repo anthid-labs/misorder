@@ -257,7 +257,19 @@ async fn serve_connection(
     let mut arrived: u64 = 0;
 
     loop {
-        let Some(request) = read_request(&mut client_read).await? else {
+        // `biased`, and for the same reason the accept loop is: this select
+        // ends the connection, it does not decide anything the service can
+        // observe. Without it a client that pools its connections holds the
+        // task open after the run is over - an egress client keeps the socket
+        // idle rather than closing it, so `serve` would block in its join for
+        // as long as that client's pool does.
+        let request = tokio::select! {
+            biased;
+            () = context.cancel.cancelled() => break,
+            request = read_request(&mut client_read) => request?,
+        };
+
+        let Some(request) = request else {
             break;
         };
 
@@ -1411,5 +1423,47 @@ mod tests {
         let encoded = String::from_utf8(response.encode()).expect("utf-8");
 
         assert_eq!(encoded, "HTTP/1.1 204 No Content\r\n\r\n");
+    }
+    /// Cancelling a run must not wait for an idle client to hang up.
+    ///
+    /// The accept loop has always broken on the token; the connection tasks
+    /// did not, and the join at the end of `serve` waits for every one of
+    /// them. `serve_connection` was blocked reading a request that would never
+    /// arrive, so shutdown took as long as the peer felt like staying.
+    ///
+    /// Invisible from an ingress placement, because the workload driver
+    /// half-closes as soon as it has sent everything - that is the documented
+    /// contract, and it doubles as the thing that ended the connection. An
+    /// egress client has no such contract and every reason to do the opposite:
+    /// a pooling http client keeps the socket open precisely so the next
+    /// request does not pay for a handshake.
+    #[tokio::test]
+    async fn cancelling_does_not_wait_for_an_idle_client_to_hang_up() {
+        let harness = Harness::start(At::nothing()).await;
+
+        let stream = TcpStream::connect(harness.proxy)
+            .await
+            .expect("reach the proxy");
+
+        let (read, mut write) = stream.into_split();
+        let mut read = BufReader::new(read);
+
+        write
+            .write_all(b"POST /one HTTP/1.1\r\nHost: service\r\nContent-Length: 2\r\n\r\n{}")
+            .await
+            .expect("send");
+
+        read_response(&mut read, "POST").await.expect("answered");
+
+        // Deliberately not shut down. The client is idle, which is a client
+        // that is still there, not one that has gone.
+        let finished = tokio::time::timeout(Duration::from_secs(5), harness.finish()).await;
+
+        assert!(
+            finished.is_ok(),
+            "cancelling the run waited on a client that had not hung up"
+        );
+
+        drop(write);
     }
 }
