@@ -9,8 +9,8 @@
 //! # Why a document and not a plugin interface
 //!
 //! Everything downstream of a run consumes this and nothing else. No hooks into
-//! engine internals, no trait a hosted service implements, no dynamic loading.
-//! That is deliberate in both directions:
+//! engine internals, no trait a consumer implements, no dynamic loading. That is
+//! deliberate in both directions:
 //!
 //! - The engine stays free to change its internals without breaking anything
 //!   built on top, because the only contract is [`FORMAT_VERSION`].
@@ -176,8 +176,8 @@ pub struct RunReport {
     /// bug agree and two that found different bugs do not.
     ///
     /// Only meaningful on a shrunk trace, and absent on a pass. Computing it
-    /// here rather than downstream means a local user gets the same identity a
-    /// hosted triage would assign, without an account.
+    /// here rather than downstream means the person at the terminal and
+    /// anything built on top agree on the identity of a bug.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
 

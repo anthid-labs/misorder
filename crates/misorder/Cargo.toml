@@ -28,7 +28,7 @@ all-features = true
 #
 # The axis exists so a contributor can add an adapter without touching anything
 # else, and so a downstream embedder can drop the client libraries it does not
-# need. It is explicitly NOT a licensing boundary: an adapter behind a paywall
+# need. It is explicitly NOT a boundary of any other kind: gating an adapter
 # kills the community contribution that is the only way the long tail of
 # vendors ever gets covered.
 [features]

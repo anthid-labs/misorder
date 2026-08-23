@@ -200,9 +200,9 @@ impl ProxyContext {
 /// One protocol misorder can sit in front of.
 ///
 /// Adding one is the intended contribution path, and it is deliberately a small
-/// surface: bind, accept, speak the protocol, ask before branching. Adapters
-/// are never paywalled, because the long tail of vendors is only ever covered
-/// by people who needed one.
+/// surface: bind, accept, speak the protocol, ask before branching. Every
+/// adapter stays open and unconditional, because the long tail of vendors is
+/// only ever covered by people who needed one.
 #[async_trait]
 pub trait Adapter: Send + Sync {
     /// `"nats"`, `"postgres"`, `"http"`.

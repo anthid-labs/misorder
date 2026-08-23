@@ -170,7 +170,7 @@ So it needs a per-vendor resolver. For Stripe that is walking `invoice` to
 work, and per-vendor work is the business.
 
 The resolver is open source and lives beside the adapter it belongs to, for the
-reason adapters are never paywalled: the long tail of vendors is only ever
+reason every adapter stays open: the long tail of vendors is only ever
 covered by the people who needed one, and a licence boundary there ends the
 contributions that are the only way it gets covered.
 

@@ -505,9 +505,10 @@ impl Runner {
 
     /// Runs many seeds, `parallel` at a time.
     ///
-    /// Runs locally and stateless, results to stdout. Distributed search is the
-    /// cloud product, and the split is structural rather than a crippled tier:
-    /// nobody resents a free CLI for not containing a job scheduler.
+    /// Runs locally and stateless, results to stdout. Fanning a sweep across
+    /// machines is somebody else's job by design - `--shard i/N` lets a machine
+    /// compute its own slice from two integers, so a shell script and a machine
+    /// list are enough and this does not grow a job scheduler.
     pub async fn fuzz(&self, seeds: Seeds, parallel: usize, shard: Option<Shard>) -> FuzzReport {
         let started = Instant::now();
         let started_at = run::now_rfc3339();

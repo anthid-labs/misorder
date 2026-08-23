@@ -223,10 +223,10 @@ impl Trace {
     /// decisions along with the six that mattered, so two runs of the same bug
     /// would never agree.
     ///
-    /// Grouping signatures into bugs, tracking them over time, and telling a
-    /// team which pull request introduced one are hosted concerns. This is the
-    /// key they are keyed on, and it is computed here so a local user gets the
-    /// same identity without an account.
+    /// Tracking signatures over time and telling a team which pull request
+    /// introduced one need state that outlives a run, so they live outside this
+    /// repository. This is the key they key on, and it is computed here so that
+    /// anything built on top and the person at the terminal agree on identity.
     pub fn signature(&self) -> String {
         let mut hasher = blake3::Hasher::new();
 

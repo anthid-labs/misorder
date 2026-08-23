@@ -113,9 +113,9 @@ this is N language products again.
   `[workspace.dependencies]`; consume them with `<name> = { workspace = true }`.
   Add a crate-local version only when a package genuinely needs to diverge.
 - One feature per protocol, all on by default. Keep code that uses an optional
-  client correctly gated. **Never paywall an adapter**: the long tail of vendors
-  is only ever covered by people who needed one, and a licence boundary there
-  ends the contributions.
+  client correctly gated. **Every adapter stays open and unconditional**: the
+  long tail of vendors is only ever covered by people who needed one, and any
+  boundary there ends the contributions.
 - Prefer `tracing` with useful context over `println!`. The CLI prints results;
   the library logs. Never log payload contents: a scenario's traffic is the
   user's production shape.
@@ -140,20 +140,38 @@ this is N language products again.
   file. Reading the scenario would check the configuration that was asked for
   rather than the one the server actually has.
 
-## Open core
+## Scope: this repository is the engine
 
-**This repository is public.** `github.com/misorder/misorder`, Apache-2.0. The
-hosted product is a separate private repository, `github.com/misorder/platform`,
-in the same organisation.
+**Stateless and local.** A run takes a scenario and a seed, does its work on one
+machine, writes its documents, and exits owning nothing. That is the whole shape
+of this repository and it is a design constraint rather than a stage.
 
-Nothing hosted goes here. Not behind a feature flag, not behind a licence check,
-not as a stub. If a change needs state that outlives one run, a second machine,
-or a network, it belongs in the platform, and what belongs here is the document
-that carries the information across.
+So the test for a new feature is: **does it need state that outlives one run, a
+second machine, or a network?** If it does, it does not belong here — not behind
+a feature flag, not as a stub. What belongs here is the *document* that carries
+the information across the boundary, so that anything built around this repo has
+something stable to read.
 
-**The coupling between the two is file formats and process boundaries, never a
-Rust API.** The platform does not depend on this crate. It reads documents this
-engine writes, writes documents it reads, and runs `mis` as a child process.
+Grouping failures within one sweep is in scope: it needs no state, and it is
+what makes the local output honest. Tracking which pull request first produced a
+signature is not, because it needs a database, and a stateless CLI should not
+grow one.
+
+Three things in particular are load-bearing and stay exactly where they are.
+Moving an **adapter** behind any boundary ends the community contribution that
+is the only way the long tail of vendors is ever covered. Moving **shrinking**
+leaves a tool that finds failures and does not reduce them, which is less useful
+than the incident it predicted. Moving the **virtual clock** leaves a tool that
+is slow, and everyone concludes the tool is slow.
+
+### The stable surfaces
+
+Anything built around this engine couples to it through **file formats and
+process boundaries, never a Rust API** — it reads documents this engine writes,
+writes documents it reads, and runs `mis` as a child process. That keeps the
+seam open to a consumer written in Python, Go or TypeScript: parsing JSON is not
+a language commitment, and linking a Rust crate is.
+
 [`docs/INTERFACES.md`](docs/INTERFACES.md) is that contract, and it is the file
 to read before changing any of these:
 
@@ -164,25 +182,8 @@ to read before changing any of these:
 - the CLI surface and its three exit codes
 
 Everything else in this repository is free to be refactored in any release, and
-should be. An open core whose internals have become a compatibility surface
-stops being developed.
-
-The dividing line for a new feature is **stateless and local stays open;
-persistent and shared is hosted.** Grouping failures within one sweep is open,
-because it needs no state and it is what makes local output honest. Tracking
-which pull request introduced a signature is hosted, because it needs a
-database.
-
-Open, permanently: the runner, the scenario format, the proxy layer, every
-adapter, the decision recorder, the seeded scheduler, the built-in invariants,
-trace shrinking, local fuzzing, any simulated dependency, the virtual clock, the
-scrubber, the transcript format.
-
-Three of those are specifically not moveable. Paywalling an **adapter** ends the
-community contribution that is the only way the long tail of vendors is ever
-covered. Paywalling **shrinking** makes the free tier produce failures less
-useful than the incident they predicted. Paywalling the **virtual clock** makes
-the free tier slow, and everyone concludes the tool is slow.
+should be. A codebase whose internals have become a compatibility surface stops
+being developed.
 
 ## The engine never phones home
 
@@ -197,11 +198,10 @@ unexpected outbound connection ends the conversation permanently. The claim
 survives only if it stays literally true, so it is checkable by reading this
 repository.
 
-It also follows from the pricing. Charging per service under test or per
-integration monitored, rather than per compute, means there is nothing to meter:
-a seed-hour meter would make someone cap the nightly sweep at 10k, the bug that
-needed seed 71830 would never surface, and they would churn saying it never
-found anything.
+Nothing here counts, caps, or reports usage either. That is a constraint on the
+code rather than a policy note: anything resembling a seed-hour meter would make
+someone cap the nightly sweep at 10k, the bug that needed seed 71830 would never
+surface, and they would conclude the tool never found anything.
 
 ## Verification
 

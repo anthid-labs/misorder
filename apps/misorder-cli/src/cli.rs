@@ -261,9 +261,10 @@ fn load(path: &Path) -> Result<Resolved> {
 
 /// The corpus a run reads behaviours from.
 ///
-/// A local directory, or nothing. A hosted corpus delivers files in the same
-/// open format, so it is still `--corpus <directory>` here: the engine has no
-/// network client, no credentials, and nothing to phone home to.
+/// A local directory, or nothing. Anything that distributes corpus entries
+/// delivers files in this same format, so it is still `--corpus <directory>`
+/// here: the engine has no network client, no credentials, and nothing to
+/// phone home to.
 fn corpus_source(root: Option<&Path>) -> Box<dyn CorpusSource> {
     match root {
         Some(root) => Box::new(LocalCorpus::new(root)),

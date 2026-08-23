@@ -4,11 +4,10 @@
 //! debugging finds which six: neutralise a decision, re-run, and keep the
 //! change if the run still fails.
 //!
-//! This ships in the open source tier, and that is a product decision worth
-//! writing down where it will be read. Withholding it would mean the free tier
-//! produces failures *less* useful than the incident they predicted: an 847
-//! line trace nobody can act on. The thing that makes someone adopt the tool is
-//! the six lines.
+//! This is not an add-on, and that is worth writing down where it will be read.
+//! A version of this tool that found failures and did not reduce them would
+//! hand you an 847 line trace nobody can act on - less useful than the incident
+//! it predicted. The thing that makes someone adopt the tool is the six lines.
 //!
 //! # You cannot shrink the seed
 //!

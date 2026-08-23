@@ -12,17 +12,18 @@
 //! ```
 //!
 //! [`CorpusSource`] is that something. This crate ships exactly one
-//! implementation, [`LocalCorpus`], which reads a directory of TOML files. A
-//! curated, verified, continuously validated corpus is a hosted product, and it
-//! implements this same trait from outside this repository. The seam exists so
-//! that adding it is a different `CorpusSource`, not a fork of the engine.
+//! implementation, [`LocalCorpus`], which reads a directory of TOML files. The
+//! trait is a seam rather than an abstraction for its own sake: a corpus
+//! assembled and validated somewhere else implements it from outside this
+//! repository, so adding one is a different `CorpusSource` rather than a fork
+//! of the engine.
 //!
-//! # Why the corpus and not the code is the thing worth paying for
+//! # Why the corpus is the hard part
 //!
 //! You cannot theorise that a broker omits the ack on a second replace. You
 //! record it. Documentation, OpenAPI specs and schemas are precisely the
 //! artifacts that were wrong in the first place, which is why the recording is
-//! the asset and why running the engine yourself does not reproduce it.
+//! the asset and why the engine alone cannot produce one.
 //!
 //! # Provenance is part of the data, not metadata about it
 //!
@@ -35,18 +36,18 @@
 //! # What is deliberately not here
 //!
 //! No registry client, no network, no credentials. The engine never phones
-//! home. Buyers in this segment treat silent collection of anything resembling
+//! home. Users in this segment treat silent collection of anything resembling
 //! production traffic as a compliance incident rather than a PR problem, and
 //! one security review that finds an unexpected outbound connection ends the
-//! conversation permanently. Anything that talks to a hosted service is a
+//! conversation permanently. Anything that talks to a remote service is a
 //! separate binary the user chooses to run.
 //!
 //! The transcript *body* format is also not here. Recording sessions is Phase 2
 //! work, and inventing a frame encoding before there is a recorder to validate
 //! it would fix the wrong shape into a compatibility surface. Behaviours
 //! reference a transcript by id and digest through [`TranscriptRef`], which is
-//! the part scenarios and drift detection need, and the body joins this trait
-//! when the recorder does.
+//! the part scenarios need today, and the body joins this trait when the
+//! recorder does.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -149,10 +150,10 @@ impl VendorBehaviors {
 
 /// Somewhere behaviours are looked up.
 ///
-/// Deliberately read-only and deliberately tiny. A hosted corpus implements
-/// this from outside the repository; nothing in the engine should ever grow a
-/// method that only a hosted implementation could answer, because that is how
-/// an open core stops building.
+/// Deliberately read-only and deliberately tiny. Other sources implement this
+/// from outside the repository, and nothing in the engine should ever grow a
+/// method only one of them could answer - a trait shaped around a single
+/// implementation stops being a seam.
 #[async_trait]
 pub trait CorpusSource: Send + Sync {
     /// Names this source in errors and reports, so a user can tell which corpus
