@@ -394,6 +394,7 @@ async fn exchange(
                 path: request.target.clone(),
                 idempotency_key: request.idempotency_key(),
                 body: request.body.clone(),
+                order,
             }),
         );
 

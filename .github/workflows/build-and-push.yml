@@ -48,12 +48,23 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
-      # The worked example is documentation that runs. `cargo test` does not
-      # execute examples and `--all-targets` only compiles them, so without this
-      # step it could stop finding the bug it exists to demonstrate and nothing
-      # would say so. It exits non-zero if the ordering goes unfound.
-      - name: Worked example finds its bug
-        run: cargo run -p misorder --example stripe_webhook_ordering
+      # The worked scenario is documentation that runs, and `cargo test` does
+      # not exercise it. Without this step it could stop finding the bug it
+      # exists to demonstrate and nothing would say so. `mis fuzz` exits 2 on a
+      # finding, which is the success condition here.
+      - name: Worked scenario finds its bug
+        run: |
+          cargo build --workspace
+          status=0
+          ./target/debug/mis fuzz examples/stripe_invoice_lifecycle.toml --seeds 200 || status=$?
+          # 2 is the finding, and here the finding is the success condition.
+          # 0 means the sweep stopped catching the naive handler; 1 means the
+          # harness could not run. Both are failures, and telling them apart is
+          # the whole reason the exit codes are three-valued.
+          if [ "$status" -ne 2 ]; then
+            echo "::error::expected exit 2 (a finding); got $status"
+            exit 1
+          fi
 
       # One feature per protocol, and a downstream embedder may enable exactly
       # one. A missing `#[cfg]` compiles fine with the default set and fails

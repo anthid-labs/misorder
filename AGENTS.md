@@ -172,6 +172,9 @@ writes documents it reads, and runs `mis` as a child process. That keeps the
 seam open to a consumer written in Python, Go or TypeScript: parsing JSON is not
 a language commitment, and linking a Rust crate is.
 
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) draws the components and the
+seams between them, which is the fastest way in.
+
 [`docs/INTERFACES.md`](docs/INTERFACES.md) is that contract, and it is the file
 to read before changing any of these:
 

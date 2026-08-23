@@ -351,6 +351,25 @@ impl FuzzReport {
     }
 }
 
+/// How far along a sweep is.
+///
+/// Handed to [`Runner::fuzz_with`]'s callback as each run finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    /// Runs finished, including the one being reported.
+    pub completed: u64,
+    /// Runs this process will do. Already sharded, so it is what this machine
+    /// is responsible for rather than what the sweep was asked for.
+    pub total: u64,
+    /// Runs that found something, so far.
+    ///
+    /// Seeds rather than distinct bugs. Grouping needs the whole sweep, and a
+    /// progress line that changed its mind about the count as it went would be
+    /// worse than one that counts something simple.
+    pub failing: u64,
+    pub elapsed: Duration,
+}
+
 /// Everything one run started and has to stop again.
 ///
 /// Held apart from [`Outcome`] because it is the teardown list rather than the
@@ -684,6 +703,30 @@ impl Runner {
     /// compute its own slice from two integers, so a shell script and a machine
     /// list are enough and this does not grow a job scheduler.
     pub async fn fuzz(&self, seeds: Seeds, parallel: usize, shard: Option<Shard>) -> FuzzReport {
+        self.fuzz_with(seeds, parallel, shard, |_| {}).await
+    }
+
+    /// The same sweep, reporting each run as it finishes.
+    ///
+    /// A callback rather than a progress bar, for the same reason [`Style`] is
+    /// a palette rather than a decision: whether anything should be drawn
+    /// depends on whether a terminal is attached, which is a fact about the
+    /// process the CLI is running in and not about a sweep. A library that drew
+    /// a bar itself would draw one into somebody's log file.
+    ///
+    /// Called once per completed run, from whichever task finished it, so an
+    /// implementation has to be cheap and thread-safe. It is not called for
+    /// runs still in flight: sixteen at a time means the count moves in steps.
+    pub async fn fuzz_with<F>(
+        &self,
+        seeds: Seeds,
+        parallel: usize,
+        shard: Option<Shard>,
+        on_progress: F,
+    ) -> FuzzReport
+    where
+        F: Fn(Progress) + Send + Sync,
+    {
         let started = Instant::now();
         let started_at = run::now_rfc3339();
 
@@ -696,11 +739,37 @@ impl Runner {
         // and are a wall of interleaved fragments for four hundred.
         let runner = Arc::new(self.clone().quiet());
 
+        let total = mine.len() as u64;
+        let done = std::sync::atomic::AtomicU64::new(0);
+        let failing = std::sync::atomic::AtomicU64::new(0);
+
         let outcomes: Vec<_> = futures::stream::iter(mine.clone())
             .map(|seed| {
                 let runner = Arc::clone(&runner);
+                let done = &done;
+                let failing = &failing;
+                let on_progress = &on_progress;
 
-                async move { (seed, runner.execute(Run::Seed(seed)).await) }
+                async move {
+                    let result = runner.execute(Run::Seed(seed)).await;
+
+                    // Counted before the callback, so a progress line can never
+                    // report more failures than completions.
+                    if matches!(&result, Ok(outcome) if !outcome.passed()) {
+                        failing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+
+                    let completed = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+
+                    on_progress(Progress {
+                        completed,
+                        total,
+                        failing: failing.load(std::sync::atomic::Ordering::Relaxed),
+                        elapsed: started.elapsed(),
+                    });
+
+                    (seed, result)
+                }
             })
             .buffer_unordered(parallel.max(1))
             .collect()

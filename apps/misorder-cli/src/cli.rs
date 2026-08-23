@@ -22,6 +22,7 @@ use clap::{Parser, Subcommand};
 use misorder::corpus::{self, CorpusSource, EmptyCorpus, LocalCorpus};
 use misorder::error::{Error, Result};
 use misorder::invariant::builtin;
+use misorder::report::Style;
 use misorder::runner::{FuzzReport, Outcome, Run, Runner, Seeds, Shard};
 use misorder::scenario::file::{Resolved, Scenario};
 use misorder::shrink;
@@ -81,8 +82,66 @@ pub struct Cli {
     #[arg(long, global = true, env = "LOG_LEVEL")]
     pub log_level: Option<String>,
 
+    /// Print without colour.
+    ///
+    /// Colour is on by default when a terminal is attached, and off when the
+    /// output is redirected, so a report piped to a file does not arrive full
+    /// of escape sequences. `NO_COLOR` turns it off too, and `CLICOLOR_FORCE`
+    /// turns it on for a CI runner that renders colour without being a tty.
+    #[arg(long, global = true)]
+    pub no_color: bool,
+
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// Whether to colour this process's output.
+///
+/// In precedence order, and the order is the point - each rule is more explicit
+/// than the one below it:
+///
+/// 1. `--no-color`, because a flag someone typed beats everything.
+/// 2. `NO_COLOR`, set to anything at all. The one convention with real
+///    adoption, and it is off-by-presence rather than by value.
+/// 3. `CLICOLOR_FORCE`, for a CI runner that renders colour without being a
+///    tty. Above `TERM` deliberately: "force" that a terminfo entry could
+///    override would not be forcing anything.
+/// 4. `TERM=dumb`, taking at its word a terminal that says it cannot.
+/// 5. Whether stderr is a tty.
+///
+/// Detection is on **stderr** rather than stdout, and that is not arbitrary.
+/// Results go to stdout and are routinely piped somewhere; the summaries and
+/// reproducers a person reads go to stderr. Deciding on stdout would print
+/// plain text to the terminal every time someone ran
+/// `mis fuzz ... > report.json`, which is the common case rather than the edge
+/// one.
+pub fn style(no_color: bool) -> Style {
+    use std::io::IsTerminal;
+
+    // Present *and* non-empty, which is what the NO_COLOR convention actually
+    // specifies. `NO_COLOR=` from a cleared shell variable means the variable
+    // is not set, and treating it as set would make `FOO= cmd` a way to
+    // silently lose colour that nobody could find.
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+
+    if no_color || set("NO_COLOR") {
+        return Style::plain();
+    }
+
+    if set("CLICOLOR_FORCE") {
+        return Style::colour();
+    }
+
+    // A terminal that says it cannot do anything is taken at its word.
+    if std::env::var("TERM").is_ok_and(|term| term == "dumb") {
+        return Style::plain();
+    }
+
+    if std::io::stderr().is_terminal() {
+        Style::colour()
+    } else {
+        Style::plain()
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -202,8 +261,12 @@ pub enum Command {
 
 impl Cli {
     pub async fn run(self) -> Result<Status> {
+        let style = style(self.no_color);
+
         match self.command {
-            Command::Check { scenario, corpus } => check(&scenario, corpus.as_deref()).await,
+            Command::Check { scenario, corpus } => {
+                check(&scenario, corpus.as_deref(), &style).await
+            }
             Command::Run {
                 scenario,
                 seed,
@@ -219,6 +282,7 @@ impl Cli {
                     shrink,
                     format,
                     corpus.as_deref(),
+                    &style,
                 )
                 .await
             }
@@ -242,10 +306,11 @@ impl Cli {
                     report_format,
                     shard.as_deref(),
                     corpus.as_deref(),
+                    &style,
                 )
                 .await
             }
-            Command::Replay { trace, scenario } => replay(&trace, &scenario).await,
+            Command::Replay { trace, scenario } => replay(&trace, &scenario, &style).await,
             Command::Shrink {
                 trace,
                 scenario,
@@ -306,7 +371,7 @@ async fn resolve_vendors(
 /// The second half matters more than it looks. A scenario permitting four
 /// faults and naming one invariant reads as thorough, and this is where a user
 /// finds out how much of that is real before spending an hour of compute on it.
-async fn check(path: &Path, corpus: Option<&Path>) -> Result<Status> {
+async fn check(path: &Path, corpus: Option<&Path>, style: &Style) -> Result<Status> {
     let resolved = load(path)?;
 
     println!("{}: {}", path.display(), resolved.name);
@@ -363,10 +428,16 @@ async fn check(path: &Path, corpus: Option<&Path>) -> Result<Status> {
         match (&spec.builtin, &spec.name) {
             (Some(name), _) => {
                 let entry = builtin::entry(name);
+                // The planned and unknown cases are the whole reason `check`
+                // exists: a scenario permitting four faults and naming one
+                // invariant reads as thorough, and this is where you find out
+                // how much of that is real before spending an hour of compute.
                 let status = match entry.map(|entry| entry.status) {
-                    Some(builtin::Status::Implemented) => "builtin",
-                    Some(builtin::Status::Planned) => "builtin, NOT IMPLEMENTED YET",
-                    None => "unknown",
+                    Some(builtin::Status::Implemented) => style.paint(style.good, "builtin"),
+                    Some(builtin::Status::Planned) => {
+                        style.paint(style.warn, "builtin, NOT IMPLEMENTED YET")
+                    }
+                    None => style.paint(style.bad, "unknown"),
                 };
 
                 println!("    {name} ({status})");
@@ -375,8 +446,10 @@ async fn check(path: &Path, corpus: Option<&Path>) -> Result<Status> {
                     println!("      {}", entry.describe);
                 }
             }
-            (None, Some(name)) => println!("    {name} (user)"),
-            (None, None) => println!("    (malformed)"),
+            (None, Some(name)) => {
+                println!("    {name} ({})", style.paint(style.good, "user"))
+            }
+            (None, None) => println!("    {}", style.paint(style.bad, "(malformed)")),
         }
     }
 
@@ -390,6 +463,7 @@ async fn run_one(
     shrink_failures: bool,
     format: Format,
     corpus: Option<&Path>,
+    style: &Style,
 ) -> Result<Status> {
     let resolved = load(path)?;
     resolve_vendors(&resolved, corpus).await?;
@@ -405,7 +479,8 @@ async fn run_one(
         match format {
             Format::Json => print!("{}", outcome.report().to_json()),
             Format::Text => eprintln!(
-                "seed {seed}: passed ({} decisions, {:?})",
+                "seed {seed}: {} ({} decisions, {:?})",
+                style.paint(style.good, "passed"),
                 outcome.trace.active_count(),
                 outcome.elapsed
             ),
@@ -425,7 +500,7 @@ async fn run_one(
                 .map_or(outcome.trace.active_count(), |(_, before)| *before);
 
             if let Some(reproducer) = reported.reproducer(original) {
-                println!("{}", reproducer.render());
+                println!("{}", reproducer.render_with(style));
             }
         }
     }
@@ -447,6 +522,7 @@ async fn fuzz(
     report_format: ReportFormat,
     shard: Option<&str>,
     corpus: Option<&Path>,
+    style: &Style,
 ) -> Result<Status> {
     let shard = shard.map(Shard::parse).transpose()?;
 
@@ -454,7 +530,13 @@ async fn fuzz(
     resolve_vendors(&resolved, corpus).await?;
 
     let runner = Runner::new(resolved);
-    let sweep = runner.fuzz(seeds, parallel, shard).await;
+    // Drawn only when stderr is a terminal, so a redirected sweep writes
+    // nothing extra and a person watching one knows it is alive.
+    let bar = crate::progress::Bar::new(*style);
+
+    let sweep = runner
+        .fuzz_with(seeds, parallel, shard, |progress| bar.update(progress))
+        .await;
 
     // Shrunk before reporting, because an unshrunk trace signs its incidental
     // decisions along with the ones that mattered, and every seed would then
@@ -462,12 +544,34 @@ async fn fuzz(
     let shown = max_failures.unwrap_or(sweep.failures.len());
     let mut reports = Vec::new();
 
-    for outcome in sweep.failures.iter().take(shown) {
+    // Rendered here rather than read back out of the document. The
+    // document's `reproducer` field is plain by construction - it is a
+    // versioned interface other tools parse, and escape codes in it would be
+    // somebody else's bug - so the coloured copy has to come from the outcome
+    // while it is still in hand.
+    let mut rendered = Vec::new();
+
+    let shrinking = std::time::Instant::now();
+
+    for (index, outcome) in sweep.failures.iter().take(shown).enumerate() {
+        bar.phase("shrinking", index as u64, shown as u64, shrinking.elapsed());
+
         let shrunk = shrink_if_asked(&runner, outcome, true).await;
         let reported = shrunk.as_ref().map_or(outcome, |(outcome, _)| outcome);
 
+        let original = shrunk
+            .as_ref()
+            .map_or(outcome.trace.active_count(), |(_, before)| *before);
+
+        if let Some(reproducer) = reported.reproducer(original) {
+            rendered.push(reproducer.render_with(style));
+        }
+
         reports.push(reported.report());
     }
+
+    bar.phase("shrinking", shown as u64, shown as u64, shrinking.elapsed());
+    bar.finish();
 
     // Anything past --max-failures is still counted, and reported unshrunk. A
     // sweep that silently dropped them would understate what it found.
@@ -477,12 +581,10 @@ async fn fuzz(
 
     let document = sweep.to_report(reports);
 
-    print_fuzz_summary(&sweep, &document);
+    print_fuzz_summary(&sweep, &document, style);
 
-    for report in document.failures.iter().take(shown) {
-        if let Some(reproducer) = &report.reproducer {
-            println!("{reproducer}");
-        }
+    for reproducer in &rendered {
+        println!("{reproducer}");
     }
 
     if let Some(destination) = report_out {
@@ -501,7 +603,7 @@ async fn fuzz(
     })
 }
 
-fn print_fuzz_summary(sweep: &FuzzReport, document: &misorder::report::SweepReport) {
+fn print_fuzz_summary(sweep: &FuzzReport, document: &misorder::report::SweepReport, style: &Style) {
     eprintln!(
         "{}: {} seed(s){} in {:?}",
         sweep.scenario,
@@ -513,41 +615,65 @@ fn print_fuzz_summary(sweep: &FuzzReport, document: &misorder::report::SweepRepo
         sweep.elapsed
     );
 
+    // Yellow, not red. A run that could not complete is not a finding, and
+    // colouring it like one is the same mistake as folding it into the failure
+    // count: it teaches people that red means "look into it eventually".
     if sweep.incomplete > 0 {
         eprintln!(
-            "  {} run(s) could not complete; this sweep did not cover what it was asked to",
-            sweep.incomplete
+            "  {}",
+            style.paint(
+                style.warn,
+                format!(
+                    "{} run(s) could not complete; this sweep did not cover what it was asked to",
+                    sweep.incomplete
+                )
+            )
         );
     }
 
     if document.distinct_failures.is_empty() {
-        eprintln!("  {} passed, none failing", sweep.passed);
+        eprintln!(
+            "  {}, none failing",
+            style.paint(style.good, format!("{} passed", sweep.passed))
+        );
         return;
     }
 
     // The line that matters. Ten failing seeds are usually two bugs, and a tool
     // that reports ten teaches people to ignore it.
     eprintln!(
-        "  {} passed, {} failing across {} distinct failure(s)",
-        sweep.passed,
-        sweep.failures.len(),
-        document.distinct_failures.len()
+        "  {}, {}",
+        style.paint(style.good, format!("{} passed", sweep.passed)),
+        style.paint(
+            style.bad,
+            format!(
+                "{} failing across {} distinct failure(s)",
+                sweep.failures.len(),
+                document.distinct_failures.len()
+            )
+        )
     );
 
     for group in &document.distinct_failures {
         let seeds: Vec<String> = group.seeds.iter().take(5).map(u64::to_string).collect();
 
         eprintln!(
-            "    {} {} ({} seed(s), first: {})",
-            group.signature,
-            group.invariant,
-            group.seeds.len(),
-            seeds.join(" ")
+            "    {} {} {}",
+            style.paint(style.dim, &group.signature),
+            style.paint(style.bad, &group.invariant),
+            style.paint(
+                style.dim,
+                format!(
+                    "({} seed(s), first: {})",
+                    group.seeds.len(),
+                    seeds.join(" ")
+                )
+            )
         );
     }
 }
 
-async fn replay(trace_path: &Path, scenario_path: &Path) -> Result<Status> {
+async fn replay(trace_path: &Path, scenario_path: &Path, style: &Style) -> Result<Status> {
     let trace = Trace::load(trace_path)?;
     let runner = Runner::new(load(scenario_path)?);
 
@@ -555,16 +681,17 @@ async fn replay(trace_path: &Path, scenario_path: &Path) -> Result<Status> {
 
     if outcome.passed() {
         eprintln!(
-            "{}: replayed {} decision(s) and the failure did not reproduce",
+            "{}: replayed {} decision(s) and the failure {}",
             trace_path.display(),
-            trace.active_count()
+            trace.active_count(),
+            style.paint(style.warn, "did not reproduce")
         );
 
         return Ok(Status::Passed);
     }
 
     if let Some(reproducer) = outcome.failure() {
-        println!("{}", reproducer.render());
+        println!("{}", reproducer.render_with(style));
     }
 
     Ok(Status::Failed)
@@ -638,7 +765,15 @@ async fn shrink_if_asked(
     // Replayed rather than trusted: the shrunk trace has to actually reproduce
     // the failure, and a shrunk trace that no longer fails is a bug in the
     // shrinker rather than a smaller reproducer.
+    //
+    // Quiet, like the shrink attempts before it. The service already logged
+    // the run that failed, and a second unlabelled copy of its output between
+    // that and the reproducer reads as the same run printed twice. What the
+    // minimal ordering was is in the reproducer's `delivery order` section,
+    // which says it better than a log dump does.
     let replayed = runner
+        .clone()
+        .quiet()
         .execute(Run::Replay(report.trace.clone()))
         .await
         .ok()

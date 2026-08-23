@@ -5,6 +5,7 @@
 //! setup and the exit code around it.
 
 mod cli;
+mod progress;
 mod telemetry;
 
 use clap::Parser;

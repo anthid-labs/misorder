@@ -273,6 +273,10 @@ seed 3, 1 of 1 decisions
 
   1. [    24ms] conn:1 reorder delivery behind #5 (POST /webhooks/stripe)
 
+  delivery order
+    sent      #1 #2 #3 #4 #5 #6
+    received  #1 #2 #3 #4 #6 #5
+
   terminal_state_is_final: /checks/reopened_after_cancel returned 1 row(s), expected none
 
   Faults 'delay' and 'connection_drop' were not required.
@@ -309,10 +313,6 @@ Reproduce it, then commit it:
 That second command runs in under a second on every pull request, and either
 reproduces or does not.
 
-There is also a version of the same story with no scenario file at all, driving
-the engine as a library — [`crates/misorder/examples/stripe_webhook_ordering.rs`](crates/misorder/examples/stripe_webhook_ordering.rs),
-runnable with `cargo run -p misorder --example stripe_webhook_ordering`.
-
 ## Quick start
 
 ```bash
@@ -338,6 +338,12 @@ own slice from two integers:
 mis fuzz scenario.toml --seeds 100000 --shard 7/64 --report shard-7.json
 ```
 
+Output is coloured when a terminal is attached and plain when it is not, so a
+report piped to a file arrives without escape sequences. `--no-color` turns it
+off, `NO_COLOR` turns it off, and `CLICOLOR_FORCE` turns it on for a CI runner
+that renders colour without being a terminal. Green held, red broke, yellow
+needs attention and is not a finding.
+
 Exit codes are the thing CI needs, and they are three-valued on purpose:
 
 | Code | Meaning                                                     |
@@ -352,6 +358,7 @@ chases it for an hour, and the next real finding gets the same treatment.
 ## How it works
 
 Six stages, and the boundaries between them are where the design lives.
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) draws each of them.
 
 1. **Scenario.** One TOML file declares what to run, what it depends on, what to
    drive at it, which faults are permitted, and what must always be true.
@@ -514,6 +521,7 @@ schedule that runs in under a second and either reproduces or does not.
 | `apps/billing-demo`     | The service under test in the worked example. Wrong on purpose. |
 | `examples/`             | Scenario files, including the one in this README, and a corpus. |
 | `docker/`               | Dockerfile and a compose example.                              |
+| `docs/ARCHITECTURE.md`  | How the components fit, with a flowchart for each.             |
 | `docs/INTERFACES.md`    | The stable formats anything built on top reads and writes.     |
 | `docs/LEDGER_IMPORT.md` | Reading recorded vendor behaviour out of a webhook events table. Specified, not implemented. |
 | `.github/workflows/`    | Lint, test, scan, and publishing.                              |

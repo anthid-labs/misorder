@@ -66,73 +66,55 @@ behaviors = [
 
 [[workload]]
 post = "/webhooks/stripe"
-
-[workload.payload]
-id = "evt_1"
-type = "customer.subscription.created"
-created = 1_760_000_000
-
-[workload.payload.data.object]
-id = "sub_1"
-status = "incomplete"
+payload.id = "evt_1"
+payload.type = "customer.subscription.created"
+payload.created = 1_760_000_000
+payload.data.object.id = "sub_1"
+payload.data.object.status = "incomplete"
 
 [[workload]]
 post = "/webhooks/stripe"
-
-[workload.payload]
-id = "evt_2"
-type = "invoice.payment_failed"
-created = 1_760_000_060
-
-[workload.payload.data.object]
-id = "in_1"
-subscription = "sub_1"
-amount_due = 4900
+payload.id = "evt_2"
+payload.type = "invoice.payment_failed"
+payload.created = 1_760_000_060
+payload.data.object.id = "in_1"
+payload.data.object.subscription = "sub_1"
+payload.data.object.amount_due = 4900
 
 # Delivered twice. Not a fault: this is Stripe delivering at least once, which
 # it says it does, and the second copy is ordinary traffic rather than an
 # error. Each repetition is a separate set of forks, so the two copies can
 # interleave inside the handler's transaction.
+
 [[workload]]
 post = "/webhooks/stripe"
 repeat = 2
-
-[workload.payload]
-id = "evt_3"
-type = "invoice.payment_succeeded"
-created = 1_760_000_120
-
-[workload.payload.data.object]
-id = "in_1"
-subscription = "sub_1"
-amount_paid = 4900
+payload.id = "evt_3"
+payload.type = "invoice.payment_succeeded"
+payload.created = 1_760_000_120
+payload.data.object.id = "in_1"
+payload.data.object.subscription = "sub_1"
+payload.data.object.amount_paid = 4900
 
 # Generated before the cancellation below. Whether it arrives before it is the
 # scheduler's decision, and the run where it does not is the one that matters.
-[[workload]]
-post = "/webhooks/stripe"
-
-[workload.payload]
-id = "evt_4"
-type = "invoice.payment_failed"
-created = 1_760_000_180
-
-[workload.payload.data.object]
-id = "in_2"
-subscription = "sub_1"
-amount_due = 4900
 
 [[workload]]
 post = "/webhooks/stripe"
+payload.id = "evt_4"
+payload.type = "invoice.payment_failed"
+payload.created = 1_760_000_180
+payload.data.object.id = "in_2"
+payload.data.object.subscription = "sub_1"
+payload.data.object.amount_due = 4900
 
-[workload.payload]
-id = "evt_5"
-type = "customer.subscription.deleted"
-created = 1_760_000_240
-
-[workload.payload.data.object]
-id = "sub_1"
-status = "canceled"
+[[workload]]
+post = "/webhooks/stripe"
+payload.id = "evt_5"
+payload.type = "customer.subscription.deleted"
+payload.created = 1_760_000_240
+payload.data.object.id = "sub_1"
+payload.data.object.status = "canceled"
 
 # `reorder` and `delay` are the two documented Stripe behaviours expressed in
 # the fault vocabulary that already exists. `connection_drop` is the third one:
@@ -147,11 +129,13 @@ enabled = ["reorder", "delay", "connection_drop", "hold_statement"]
 # A webhook that is neither answered nor failed is the worst outcome here: the
 # service does not know whether it applied the event, and Stripe retries
 # regardless.
+
 [[invariants]]
 builtin = "every_request_reaches_terminal_state"
 
 # Postgres turns a commit after an error into a rollback, so the settlement the
 # handler believes it wrote did not happen and the event is marked processed.
+
 [[invariants]]
 builtin = "no_commit_after_error"
 

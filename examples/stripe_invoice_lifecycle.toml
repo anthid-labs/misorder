@@ -69,70 +69,51 @@ quiesce_after = "150ms"
 
 [[workload]]
 post = "/webhooks/stripe"
-
-[workload.payload]
-id = "evt_1"
-type = "customer.subscription.created"
-created = 1_760_000_000
-
-[workload.payload.data.object]
-id = "sub_1"
-status = "incomplete"
+payload.id = "evt_1"
+payload.type = "customer.subscription.created"
+payload.created = 1_760_000_000
+payload.data.object.id = "sub_1"
+payload.data.object.status = "incomplete"
 
 [[workload]]
 post = "/webhooks/stripe"
-
-[workload.payload]
-id = "evt_2"
-type = "invoice.payment_failed"
-created = 1_760_000_060
-
-[workload.payload.data.object]
-id = "in_1"
-subscription = "sub_1"
-amount_due = 4900
+payload.id = "evt_2"
+payload.type = "invoice.payment_failed"
+payload.created = 1_760_000_060
+payload.data.object.id = "in_1"
+payload.data.object.subscription = "sub_1"
+payload.data.object.amount_due = 4900
 
 # Delivered twice, and that is not a fault: Stripe delivers at least once and
 # says so, so the second copy is ordinary traffic. Each repetition is its own
 # set of forks, so the two copies can interleave.
+
 [[workload]]
 post = "/webhooks/stripe"
 repeat = 2
-
-[workload.payload]
-id = "evt_3"
-type = "invoice.payment_succeeded"
-created = 1_760_000_120
-
-[workload.payload.data.object]
-id = "in_1"
-subscription = "sub_1"
-amount_paid = 4900
+payload.id = "evt_3"
+payload.type = "invoice.payment_succeeded"
+payload.created = 1_760_000_120
+payload.data.object.id = "in_1"
+payload.data.object.subscription = "sub_1"
+payload.data.object.amount_paid = 4900
 
 [[workload]]
 post = "/webhooks/stripe"
-
-[workload.payload]
-id = "evt_4"
-type = "invoice.payment_failed"
-created = 1_760_000_180
-
-[workload.payload.data.object]
-id = "in_2"
-subscription = "sub_1"
-amount_due = 4900
+payload.id = "evt_4"
+payload.type = "invoice.payment_failed"
+payload.created = 1_760_000_180
+payload.data.object.id = "in_2"
+payload.data.object.subscription = "sub_1"
+payload.data.object.amount_due = 4900
 
 [[workload]]
 post = "/webhooks/stripe"
-
-[workload.payload]
-id = "evt_5"
-type = "customer.subscription.deleted"
-created = 1_760_000_240
-
-[workload.payload.data.object]
-id = "sub_1"
-status = "canceled"
+payload.id = "evt_5"
+payload.type = "customer.subscription.deleted"
+payload.created = 1_760_000_240
+payload.data.object.id = "sub_1"
+payload.data.object.status = "canceled"
 
 # ── The faults ────────────────────────────────────────────────────────────────
 #
@@ -148,6 +129,7 @@ enabled = ["reorder", "delay", "connection_drop"]
 # A webhook that is neither answered nor failed is the worst outcome available:
 # the service does not know whether it applied the event, and Stripe retries
 # regardless.
+
 [[invariants]]
 builtin = "every_request_reaches_terminal_state"
 
@@ -158,6 +140,7 @@ builtin = "eventually_quiescent"
 # path answers a question about the *bad* state and returns the offending rows,
 # so `expect = "empty"` needs no knowledge of how many rows a correct run
 # produces and stays a test of the service rather than of this file.
+
 [[invariants]]
 name = "terminal_state_is_final"
 check = "http"

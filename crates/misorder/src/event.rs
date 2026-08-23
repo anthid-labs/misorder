@@ -188,6 +188,16 @@ pub enum HttpEvent {
         /// itself on day one.
         idempotency_key: Option<String>,
         body: Bytes,
+        /// Which request this was in the order the client *sent* them,
+        /// counting from zero on this connection.
+        ///
+        /// Events are emitted in the order requests reached the service, so
+        /// this and the emission order are the two halves of "what the client
+        /// sent" versus "what the service saw". A reordering is the two
+        /// disagreeing, and without this there is nothing to disagree with:
+        /// six identical `POST /webhooks/stripe` lines say nothing about
+        /// which one moved.
+        order: u64,
     },
     Response {
         status: u16,

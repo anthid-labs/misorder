@@ -189,6 +189,9 @@ mod tests {
             path: "/v1/charges".to_string(),
             idempotency_key: key.map(str::to_string),
             body: Bytes::new(),
+            // These invariants are about idempotency keys and terminal states,
+            // neither of which reads the send order.
+            order: 0,
         }
     }
 
