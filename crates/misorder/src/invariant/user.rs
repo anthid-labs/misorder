@@ -46,18 +46,161 @@ pub fn build(spec: &InvariantSpec) -> Result<Box<dyn Invariant>> {
         .clone()
         .ok_or_else(|| Error::Internal("build called without a `name` key".to_string()))?;
 
+    let expect = spec.expect.unwrap_or_default();
+
     match spec.check {
-        Some(CheckKind::Sql) => {
+        Some(kind @ (CheckKind::Sql | CheckKind::Http)) => {
             let query = spec
                 .query
                 .clone()
                 .ok_or_else(|| Error::Scenario(format!("invariant `{name}` has no `query`")))?;
 
-            build_sql(name, query, spec.expect.unwrap_or_default())
+            match kind {
+                CheckKind::Sql => build_sql(name, query, expect),
+                CheckKind::Http => Ok(Box::new(HttpInvariant {
+                    name,
+                    path: query,
+                    expect,
+                })),
+            }
         }
         None => Err(Error::Scenario(format!(
-            "invariant `{name}` has no `check`; use `check = \"sql\"`"
+            "invariant `{name}` has no `check`; use `check = \"sql\"` or `check = \"http\"`"
         ))),
+    }
+}
+
+/// A question put to the service under test once the system is quiescent.
+///
+/// The HTTP counterpart of [`SqlInvariant`], and deliberately the same shape:
+/// `query` is a path that answers a question about the *bad* state, and
+/// `expect = "empty"` is what a healthy run returns. A service that owns its
+/// own storage can be checked without a database beside it, which is the
+/// difference between a scenario someone can run and one they have to set up
+/// first.
+///
+/// Asked of the service directly rather than through the proxy. A terminal
+/// check routed through the fault injector could be dropped, delayed past the
+/// report, or reordered, and the invariant would then be measuring the harness.
+#[derive(Debug)]
+struct HttpInvariant {
+    name: String,
+    path: String,
+    expect: Expect,
+}
+
+#[async_trait::async_trait]
+impl Invariant for HttpInvariant {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn describe(&self) -> &str {
+        "an HTTP check against the final state"
+    }
+
+    fn observe(&mut self, _observed: &Observed) -> Option<Violation> {
+        None
+    }
+
+    async fn finish(&mut self, context: &CheckContext) -> Result<Option<Violation>> {
+        let Some(base) = &context.service_url else {
+            return Err(Error::Scenario(format!(
+                "invariant `{}` uses `check = \"http\"`, but no [[system]] declares a \
+                 `listen_env`, so there is no service address to ask",
+                self.name
+            )));
+        };
+
+        let rows = http_get_rows(base, &self.path)
+            .await
+            .map_err(|error| Error::Environment(format!("checking `{}`: {error}", self.name)))?;
+
+        let violated = match self.expect {
+            Expect::Empty => rows > 0,
+            Expect::NonEmpty => rows == 0,
+        };
+
+        if !violated {
+            return Ok(None);
+        }
+
+        Ok(Some(Violation {
+            invariant: self.name.clone(),
+            detail: match self.expect {
+                Expect::Empty => format!("{} returned {rows} row(s), expected none", self.path),
+                Expect::NonEmpty => {
+                    format!("{} returned no rows, expected at least one", self.path)
+                }
+            },
+            at: context.elapsed,
+        }))
+    }
+}
+
+/// GETs a path and counts the rows in the answer.
+///
+/// A hand-rolled request rather than an HTTP client dependency: this is one
+/// GET against loopback, and the engine's dependency list is something buyers
+/// read.
+async fn http_get_rows(base: &str, path: &str) -> std::result::Result<usize, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(base)
+        .await
+        .map_err(|error| format!("connecting to the service at {base}: {error}"))?;
+
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+
+    let request = format!("GET {path} HTTP/1.1\r\nHost: misorder\r\nConnection: close\r\n\r\n");
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|error| format!("sending the check request: {error}"))?;
+
+    let mut response = String::new();
+
+    stream
+        .read_to_string(&mut response)
+        .await
+        .map_err(|error| format!("reading the check response: {error}"))?;
+
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "the service answered without a complete header".to_string())?;
+
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| "the service answered without a status line".to_string())?;
+
+    if !status.starts_with('2') {
+        return Err(format!("the service answered {status} to {path}"));
+    }
+
+    let body = body.trim();
+
+    if body.is_empty() || body == "null" {
+        return Ok(0);
+    }
+
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| format!("the answer to {path} is not JSON: {error}"))?;
+
+    match value {
+        serde_json::Value::Null => Ok(0),
+        serde_json::Value::Array(rows) => Ok(rows.len()),
+        // A single object is one row. Anything else is a service answering the
+        // wrong shape, and saying so beats silently counting it as healthy.
+        serde_json::Value::Object(_) => Ok(1),
+        other => Err(format!(
+            "the answer to {path} should be a JSON array of the bad rows, got {other}"
+        )),
     }
 }
 

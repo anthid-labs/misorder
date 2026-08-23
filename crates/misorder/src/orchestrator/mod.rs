@@ -21,6 +21,7 @@
 //! stays even then, because it is what the simulator gets diffed against.
 
 pub mod docker;
+pub mod process;
 pub mod topology;
 
 use std::collections::BTreeMap;
@@ -60,6 +61,15 @@ impl Environment {
             ready_timeout = ?settings.ready_timeout,
             "starting dependencies"
         );
+
+        // No declared dependency, no daemon. A scenario whose service owns its
+        // own storage — every HTTP ingress scenario, among others — should not
+        // need Docker installed to run, and requiring it would make the first
+        // five minutes of the tool a Docker troubleshooting session for people
+        // whose scenario never needed a container.
+        if deps.declared().is_empty() {
+            return Ok(Self::default());
+        }
 
         let client = docker::Client::connect().await?;
 
@@ -137,6 +147,18 @@ mod tests {
             environment.postgres_url("ledger").as_deref(),
             Some("postgres://misorder:misorder@127.0.0.1:54321/ledger")
         );
+    }
+
+    /// The property that lets an HTTP scenario run on a machine with no Docker
+    /// at all. If this starts reaching the daemon, every dependency-free
+    /// scenario gains a hard requirement nobody asked for.
+    #[tokio::test]
+    async fn a_scenario_with_no_dependencies_never_reaches_the_daemon() {
+        let environment = Environment::start(&Deps::default(), &RunSettings::default())
+            .await
+            .expect("no dependencies means nothing to start");
+
+        assert!(environment.dependencies().is_empty());
     }
 
     #[test]

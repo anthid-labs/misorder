@@ -18,6 +18,16 @@
 #   mis check examples/stripe_webhook_ordering.toml --corpus examples/corpus
 #   mis fuzz examples/stripe_webhook_ordering.toml --seeds 10000 --corpus examples/corpus
 #
+# This file is the scenario as you would write it for a real service against a
+# real Postgres, and running it needs the container orchestration that is not
+# built yet. The same story, in memory and runnable today, is:
+#
+#   cargo run -p misorder --example stripe_webhook_ordering
+#
+# That one stands the handler up on a loopback port, puts the HTTP proxy in
+# front of it, and shrinks the ordering it finds. Read it beside this file:
+# what changes is the plumbing, not the scenario.
+#
 # The workload below is one subscription's lifecycle in the order Stripe
 # generated it. What order the handler sees is the scheduler's to decide, which
 # is the point: writing the events out of order by hand tests one ordering, and

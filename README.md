@@ -14,12 +14,13 @@ combinations for the weak points unknown until a production outage.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Status: skeleton. The seams work, the protocol adapters do not yet.** What is
-implemented and tested today: the scenario format, the seeded scheduler, the
-trace format and replay, the delta-debugging shrinker, the built-in invariant
-set, the reproducer and JUnit output, and the CLI around all of it. What is not:
-the Docker orchestration and the NATS and Postgres wire adapters. Those report
-`not supported yet` rather than pretending. See [Roadmap](#roadmap).
+**Status: the HTTP loop closes; the other two protocols do not yet.** An HTTP
+scenario runs end to end today — `mis run` starts your service, puts the proxy
+in front of it, drives the workload through it, checks the invariants and hands
+back a shrunk reproducer, with no Docker involved. What is not done: the NATS
+and Postgres wire adapters, and the container orchestration the scenarios
+needing them would use. Those report `not supported yet` rather than pretending.
+See [Roadmap](#roadmap).
 
 ## The words this README uses
 
@@ -250,6 +251,68 @@ Or build from source:
 cargo build --release --package misorder-cli
 ```
 
+## Start here: a worked example
+
+Five Stripe webhooks for one subscription, against a deliberately naive billing
+handler. Everything it needs is in this repository and none of it is Docker:
+
+```bash
+cargo build --workspace
+./target/debug/mis fuzz examples/stripe_invoice_lifecycle.toml --seeds 400
+```
+
+```text
+  applied evt_1    customer.subscription.created    -> incomplete
+  applied evt_2    invoice.payment_failed           -> past_due
+  applied evt_3    invoice.payment_succeeded        -> active
+  applied evt_5    customer.subscription.deleted    -> canceled
+  applied evt_4    invoice.payment_failed           -> past_due
+
+MINIMAL REPRODUCER: stripe_invoice_lifecycle
+seed 3, 1 of 1 decisions
+
+  1. [    24ms] conn:1 reorder delivery behind #5 (POST /webhooks/stripe)
+
+  terminal_state_is_final: /checks/reopened_after_cancel returned 1 row(s), expected none
+
+  Faults 'delay' and 'connection_drop' were not required.
+
+stripe_invoice_lifecycle: 400 seed(s) in 11.3s
+  388 passed, 12 failing across 1 distinct failure(s)
+    f3f080cd86bcbb60 terminal_state_is_final (12 seed(s), first: 3 6 41 93 189)
+```
+
+One delivery arrived after the cancellation, and a cancelled customer is being
+dunned again. Nobody wrote a bug: the handler even deduplicates on the event id,
+which is exactly what Stripe's documentation tells you to do. The duplicate
+advice is a heading with a code sample; the ordering advice is one sentence with
+nothing to copy, and it is the one that costs money.
+
+Twelve seeds found it and they are **one** failure, not twelve — grouped by the
+signature of the shape, which is what stops a sweep reading as a wall of red.
+
+The pieces: [`examples/stripe_invoice_lifecycle.toml`](examples/stripe_invoice_lifecycle.toml)
+is the scenario, [`apps/billing-demo`](apps/billing-demo) is the service under
+test, and [`examples/corpus/stripe.toml`](examples/corpus/stripe.toml) is where
+the claims about Stripe's behaviour come from, each with its source.
+
+Reproduce it, then commit it:
+
+```bash
+./target/debug/mis run examples/stripe_invoice_lifecycle.toml --seed 3 --shrink \
+  --trace tests/reproducers/reopened-after-cancel.jsonl
+
+./target/debug/mis replay tests/reproducers/reopened-after-cancel.jsonl \
+  -s examples/stripe_invoice_lifecycle.toml
+```
+
+That second command runs in under a second on every pull request, and either
+reproduces or does not.
+
+There is also a version of the same story with no scenario file at all, driving
+the engine as a library — [`crates/misorder/examples/stripe_webhook_ordering.rs`](crates/misorder/examples/stripe_webhook_ordering.rs),
+runnable with `cargo run -p misorder --example stripe_webhook_ordering`.
+
 ## Quick start
 
 ```bash
@@ -420,18 +483,27 @@ scenario.
 
 ## CI
 
+The exit code is the whole integration. Three-valued, so a broken Docker socket
+never looks like a caught bug:
+
 ```bash
-mis fuzz scenario.toml --seeds 5000 --parallel 16 --junit junit.xml
+mis fuzz scenario.toml --seeds 5000 --parallel 16
+```
+
+For anything that wants to store or compare results, `--report` writes the
+sweep as JSON and `--report-format csv` writes one row per failing seed.
+Both are described in [`docs/INTERFACES.md`](docs/INTERFACES.md).
+
+**Sweeps belong on a schedule, not on every pull request.** Five thousand
+orderings is minutes, and the point of a sweep is to find something new. What
+belongs on every pull request is what the sweep already found:
+
+```bash
+mis replay tests/reproducers/reopened-after-cancel.jsonl -s scenario.toml
 ```
 
 A shrunk trace committed to the repository is not a flaky test. It is an exact
-replayable sequence:
-
-```bash
-mis replay tests/reproducers/dead-letter.jsonl
-```
-
-That runs in seconds on every pull request and either reproduces or does not.
+schedule that runs in under a second and either reproduces or does not.
 
 ## Layout
 
@@ -439,6 +511,7 @@ That runs in seconds on every pull request and either reproduces or does not.
 | ----------------------- | ------------------------------------------------------------- |
 | `crates/misorder`       | The library: scenario, orchestrator, proxy, schedule, trace, invariants, shrinker. |
 | `apps/misorder-cli`     | The `mis` binary: argument parsing, logging setup, exit codes. |
+| `apps/billing-demo`     | The service under test in the worked example. Wrong on purpose. |
 | `examples/`             | Scenario files, including the one in this README, and a corpus. |
 | `docker/`               | Dockerfile and a compose example.                              |
 | `docs/INTERFACES.md`    | The stable formats anything built on top reads and writes.     |
@@ -529,16 +602,17 @@ language — has a stable surface to build on.
 - **The NATS and Postgres wire adapters.** The seam is defined and the fault
   vocabulary is complete; the codecs are not written. The HTTP one is:
   `proxy::http` speaks HTTP/1.1 and asks at every fork.
-- **Wiring the adapters into a run.** `runner` does not start a proxy, and a
-  scenario has no way to ask for one. The HTTP adapter binds, serves and is
-  tested on its own; nothing calls it yet.
+- **Egress HTTP.** The ingress placement is wired: the workload posts through
+  the proxy to your service. The other direction — your service calling a vendor
+  through the proxy — works when driven as a library, but a scenario cannot
+  declare an HTTP dependency yet, so there is no `mis run` path to it.
 - **Container orchestration.** `orchestrator::docker` connects to the daemon and
-  reports a clear error; it does not yet start anything.
-- **The workload driver.** Publishing and posting are declared and validated,
-  and neither is wired to a client yet. For HTTP the driver owes the ingress
-  proxy one thing: send the posts without waiting for each answer, then shut
-  down the write half, so a request the schedule deferred has something to be
-  overtaken by and something to release it.
+  reports a clear error; it does not yet start anything. A scenario declaring no
+  dependencies never reaches it, which is why the worked example runs without
+  Docker.
+- **Publishing a workload step.** The NATS side of the driver. Posting is
+  implemented, and posts go out pipelined on one connection followed by a
+  half-close, which is what gives a reorder two requests in flight to swap.
 - **Quiescence detection.** Phase 1 uses an idle window, which is a heuristic.
   It is deliberately conservative: calling quiescence during a 40ms CPU burst
   would manufacture a failure that never happened.

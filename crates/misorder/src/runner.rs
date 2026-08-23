@@ -16,12 +16,17 @@ use crate::error::{Error, Result};
 use crate::event::{Event, Lifecycle, Observed};
 use crate::invariant::{CheckContext, Checker, Violation};
 use crate::orchestrator::Environment;
+use crate::orchestrator::process::Service;
 use crate::proxy::EventSink;
+#[cfg(feature = "http")]
+use crate::proxy::http::HttpAdapter;
+#[cfg(feature = "http")]
+use crate::proxy::{Adapter, ProxyContext};
 use crate::report::Reproducer;
 use crate::report::run::{
     self, Decisions, Engine, Faults, RunReport, ScenarioRef, ShardRef, SweepReport, Verdict,
 };
-use crate::scenario::file::Resolved;
+use crate::scenario::file::{Resolved, Step};
 use crate::schedule::{Profile, Scheduler};
 use crate::shrink::{self, Oracle};
 use crate::trace::Trace;
@@ -346,11 +351,44 @@ impl FuzzReport {
     }
 }
 
+/// Everything one run started and has to stop again.
+///
+/// Held apart from [`Outcome`] because it is the teardown list rather than the
+/// result: a run that failed still started a service, and the failure the user
+/// reports should be the one they hit rather than "address already in use" on
+/// the next run.
+#[derive(Default)]
+struct Running {
+    services: Vec<Service>,
+    /// Where the first system listens, for a terminal `check = "http"`.
+    service_address: Option<std::net::SocketAddr>,
+    /// Where the workload driver posts, when an ingress proxy was bound.
+    ingress: Option<std::net::SocketAddr>,
+    proxy: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+impl Running {
+    /// Stops every service. Best effort, and never fails the run.
+    async fn stop(self) {
+        for service in self.services {
+            service.stop().await;
+        }
+    }
+}
+
 /// Runs a scenario.
 #[derive(Debug, Clone)]
 pub struct Runner {
     scenario: Resolved,
     profile: Profile,
+    /// Whether the service under test keeps this process's stdout and stderr.
+    ///
+    /// True for one run, because the service's own logs beside the reproducer
+    /// are most of what makes a reordering failure legible. False for a sweep,
+    /// where sixteen services sharing one terminal do not interleave neatly -
+    /// they interleave *within a line*, and the result is unreadable rather
+    /// than merely noisy.
+    service_output: bool,
 }
 
 impl Runner {
@@ -358,7 +396,17 @@ impl Runner {
         Self {
             scenario,
             profile: Profile::default(),
+            service_output: true,
         }
+    }
+
+    /// Silences the service under test.
+    ///
+    /// Set by [`Runner::fuzz`] for its inner runs. A caller driving many runs
+    /// itself wants the same thing.
+    pub fn quiet(mut self) -> Self {
+        self.service_output = false;
+        self
     }
 
     pub fn with_profile(mut self, profile: Profile) -> Self {
@@ -397,15 +445,33 @@ impl Runner {
 
         let environment = Environment::start(&self.scenario.deps, &self.scenario.run).await?;
 
-        // From here on the environment must be torn down whatever happens, so
-        // the rest is one fallible block and the teardown is unconditional. A
-        // run that failed and leaked a Postgres container makes the next run
-        // fail too, and the second failure is the one the user reports.
+        // From here on the environment and the service must be torn down
+        // whatever happens, so the rest is one fallible block and the teardown
+        // is unconditional. A run that failed and leaked a Postgres container
+        // makes the next run fail too, and the second failure is the one the
+        // user reports.
+        let mut running = Running::default();
+
         let outcome = self
-            .drive(&environment, &scheduler, &events, &cancel, started)
+            .drive(
+                &environment,
+                &scheduler,
+                &events,
+                &cancel,
+                started,
+                &mut running,
+            )
             .await;
 
+        // The proxy first, so nothing is still writing events when they are
+        // collected. The service stays up: the terminal checks below are about
+        // to ask it what its state ended up as.
         cancel.cancel();
+
+        if let Some(proxy) = running.proxy.take() {
+            let _ = proxy.await;
+        }
+
         drop(events);
 
         let mut collected = Vec::new();
@@ -415,6 +481,7 @@ impl Runner {
         }
 
         let context = CheckContext {
+            service_url: running.service_address.map(|address| address.to_string()),
             postgres_url: self
                 .scenario
                 .deps
@@ -426,6 +493,7 @@ impl Runner {
 
         let finished = checker.finish(&context).await;
 
+        running.stop().await;
         environment.stop().await;
 
         outcome?;
@@ -451,7 +519,15 @@ impl Runner {
         })
     }
 
-    /// Starts the service, drives the workload, waits for the system to settle.
+    /// Starts the service, puts the proxies in front of it, drives the
+    /// workload, waits for the system to settle.
+    ///
+    /// The order is load-bearing and is the same on every path through the
+    /// tool. In particular the proxy binds *after* the service is listening and
+    /// *before* any workload is driven: bound earlier it would forward to a
+    /// port nothing has opened, and driven earlier the first requests would
+    /// bypass the fault injection entirely and the run would quietly test less
+    /// than it claimed.
     async fn drive(
         &self,
         environment: &Environment,
@@ -459,23 +535,121 @@ impl Runner {
         events: &EventSink,
         cancel: &CancellationToken,
         started: Instant,
+        running: &mut Running,
     ) -> Result<()> {
-        let _ = (scheduler, cancel);
-
         for system in &self.scenario.system {
+            // Nothing to inject yet. This is where a proxied dependency's
+            // address arrives for an egress placement — the service reaches its
+            // database through the proxy by reading an ordinary environment
+            // variable, which is the whole "no SDK" stance in one mechanism.
+            let injected: Vec<(String, String)> = Vec::new();
+
+            let mut service = Service::start(system, &injected, self.service_output).await?;
+
             events.emit_lifecycle(
                 started.elapsed(),
                 Event::Lifecycle(Lifecycle::SystemStarted {
                     command: system.run.clone(),
                 }),
             );
+
+            service
+                .await_ready(system.ready_when, self.scenario.run.ready_timeout)
+                .await?;
+
+            running.service_address = running.service_address.or_else(|| service.address());
+            running.services.push(service);
+        }
+
+        events.emit_lifecycle(started.elapsed(), Event::Lifecycle(Lifecycle::SystemReady));
+
+        let ingress = self
+            .start_ingress(running.service_address, scheduler, events, cancel)
+            .await?;
+
+        if let Some((address, task)) = ingress {
+            running.proxy = Some(task);
+            running.ingress = Some(address);
         }
 
         Driver::new(environment, events)
+            .with_ingress(running.ingress)
             .run(&self.scenario.workload, started.elapsed())
             .await?;
 
         self.await_quiescence(events, started).await
+    }
+
+    /// Binds the ingress HTTP proxy, when the workload has anything to post.
+    ///
+    /// Ingress rather than egress, and the difference is which way the arrow
+    /// points: a webhook is the vendor calling the service, so the proxy is
+    /// what the *workload driver* posts to and the service is upstream of it.
+    /// A scenario with no `post` step needs none of this, and binding one
+    /// anyway would put a listening socket in every run that never used it.
+    #[cfg(feature = "http")]
+    async fn start_ingress(
+        &self,
+        service: Option<std::net::SocketAddr>,
+        scheduler: &Scheduler,
+        events: &EventSink,
+        cancel: &CancellationToken,
+    ) -> Result<Option<(std::net::SocketAddr, tokio::task::JoinHandle<Result<()>>)>> {
+        let posts = self
+            .scenario
+            .workload
+            .iter()
+            .any(|step| matches!(step, Step::Post { .. }));
+
+        if !posts {
+            return Ok(None);
+        }
+
+        let Some(service) = service else {
+            return Err(Error::Scenario(
+                "a [[workload]] step posts, so misorder needs to put an ingress proxy in front \
+                 of the service - give the [[system]] a `listen_env` naming the variable it \
+                 reads its port from"
+                    .to_string(),
+            ));
+        };
+
+        let mut adapter = HttpAdapter::new();
+        let endpoint = adapter.bind(&service.to_string()).await?;
+        let listen = endpoint.listen;
+
+        let context = ProxyContext::new(
+            scheduler.clone(),
+            service.to_string(),
+            events.clone(),
+            cancel.clone(),
+        );
+
+        let task = tokio::spawn(async move { adapter.serve(context).await });
+
+        Ok(Some((listen, task)))
+    }
+
+    #[cfg(not(feature = "http"))]
+    async fn start_ingress(
+        &self,
+        _service: Option<std::net::SocketAddr>,
+        _scheduler: &Scheduler,
+        _events: &EventSink,
+        _cancel: &CancellationToken,
+    ) -> Result<Option<(std::net::SocketAddr, tokio::task::JoinHandle<Result<()>>)>> {
+        if self
+            .scenario
+            .workload
+            .iter()
+            .any(|step| matches!(step, Step::Post { .. }))
+        {
+            return Err(Error::Unsupported(
+                "this scenario posts, but the build has no http feature".to_string(),
+            ));
+        }
+
+        Ok(None)
     }
 
     /// Waits for an idle window with no proxied traffic.
@@ -518,7 +692,9 @@ impl Runner {
             .filter(|seed| shard.is_none_or(|shard| shard.contains(*seed)))
             .collect();
 
-        let runner = Arc::new(self.clone());
+        // Quiet, because the services' own logs are worth reading for one run
+        // and are a wall of interleaved fragments for four hundred.
+        let runner = Arc::new(self.clone().quiet());
 
         let outcomes: Vec<_> = futures::stream::iter(mine.clone())
             .map(|seed| {
@@ -578,7 +754,11 @@ impl Runner {
             .ok_or_else(|| Error::Internal("shrinking a run that passed".to_string()))?;
 
         let mut oracle = RunOracle {
-            runner: self.clone(),
+            // Quiet, because shrinking re-runs the scenario dozens of times.
+            // The logs worth reading are the ones from the run that failed,
+            // which the caller has already seen; forty more copies of them
+            // between that and the reproducer buries it.
+            runner: self.clone().quiet(),
             invariant: violation.invariant.clone(),
         };
 

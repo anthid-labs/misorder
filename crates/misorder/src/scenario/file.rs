@@ -146,6 +146,19 @@ pub struct System {
     /// testing nothing.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+
+    /// The environment variable this service reads its listen port from.
+    ///
+    /// Needed for an **ingress** run, where the proxy sits in front of the
+    /// service and has to know where to forward. misorder picks a free port per
+    /// run and sets this variable to it.
+    ///
+    /// Per run rather than pinned in the scenario, because
+    /// `mis fuzz --parallel 16` starts sixteen services at once and sixteen
+    /// processes cannot share a port. The variable name is yours to choose:
+    /// there is no convention worth guessing at.
+    #[serde(default)]
+    pub listen_env: Option<String>,
 }
 
 /// How readiness is detected.
@@ -160,6 +173,13 @@ pub enum Ready {
     NatsSubscriptionActive,
     /// A Postgres startup message has been answered.
     PostgresConnected,
+    /// The service is accepting connections on the port misorder gave it.
+    ///
+    /// The ingress counterpart of the three above, which are all detected from
+    /// traffic crossing a proxy — and an ingress service makes no outbound
+    /// traffic before its first request arrives. Needs `listen_env` on the
+    /// system, because it is that port being polled.
+    HttpListening,
     /// Assume ready immediately. For a service whose first act is to receive.
     Immediate,
 }
@@ -176,6 +196,7 @@ impl Ready {
             Ready::FirstConnection => "first_connection",
             Ready::NatsSubscriptionActive => "nats_subscription_active",
             Ready::PostgresConnected => "postgres_connected",
+            Ready::HttpListening => "http_listening",
             Ready::Immediate => "immediate",
         }
     }
@@ -418,7 +439,7 @@ pub struct InvariantSpec {
     #[serde(default)]
     pub name: Option<String>,
 
-    /// How a user invariant is checked. Currently only `sql`.
+    /// How a user invariant is checked: `sql` or `http`.
     #[serde(default)]
     pub check: Option<CheckKind>,
 
@@ -445,6 +466,30 @@ pub enum CheckKind {
     /// Run a query against the scenario's Postgres once the system is
     /// quiescent.
     Sql,
+    /// GET a path on the service under test once the system is quiescent, and
+    /// read the answer as the result set.
+    ///
+    /// The same shape as `sql` and for the same reason: `query` is a question
+    /// about the *bad* state and `expect = "empty"` is the answer a healthy run
+    /// gives. A service that can answer "which subscriptions were reopened
+    /// after cancellation" in SQL can answer it over HTTP, and a scenario whose
+    /// service owns its own storage should not have to run a database to be
+    /// checkable.
+    ///
+    /// The response body is read as a JSON array. Empty array, empty body, or
+    /// `null` all count as empty.
+    Http,
+}
+
+impl CheckKind {
+    /// The name as written in the scenario file, so an error quotes back the
+    /// string the user typed.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckKind::Sql => "sql",
+            CheckKind::Http => "http",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -671,12 +716,16 @@ fn validate_invariant(spec: &InvariantSpec) -> Result<()> {
             }
         }
         (None, Some(name)) => match spec.check {
-            Some(CheckKind::Sql) if spec.query.is_some() => Ok(()),
-            Some(CheckKind::Sql) => Err(Error::Scenario(format!(
-                "invariant `{name}` has `check = \"sql\"` but no `query`"
+            Some(kind) if spec.query.is_some() => {
+                let _ = kind;
+                Ok(())
+            }
+            Some(kind) => Err(Error::Scenario(format!(
+                "invariant `{name}` has `check = \"{}\"` but no `query`",
+                kind.as_str()
             ))),
             None => Err(Error::Scenario(format!(
-                "invariant `{name}` has no `check`; use `check = \"sql\"`"
+                "invariant `{name}` has no `check`; use `check = \"sql\"` or `check = \"http\"`"
             ))),
         },
         (Some(builtin), Some(name)) => Err(Error::Scenario(format!(

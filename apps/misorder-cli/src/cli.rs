@@ -22,7 +22,6 @@ use clap::{Parser, Subcommand};
 use misorder::corpus::{self, CorpusSource, EmptyCorpus, LocalCorpus};
 use misorder::error::{Error, Result};
 use misorder::invariant::builtin;
-use misorder::report::junit;
 use misorder::runner::{FuzzReport, Outcome, Run, Runner, Seeds, Shard};
 use misorder::scenario::file::{Resolved, Scenario};
 use misorder::shrink;
@@ -39,6 +38,24 @@ const DEFAULT_SCENARIO_PATH: &str = "scenario.toml";
 pub enum Status {
     Passed,
     Failed,
+}
+
+/// How a sweep report is written.
+///
+/// Separate from [`Format`] because they answer different questions. `Format`
+/// is how a single run talks to the terminal; this is which of two documents a
+/// sweep writes to a file, and one of them is not a document at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum ReportFormat {
+    /// The versioned sweep report. The supported interface, and what anything
+    /// that stores or compares results should read.
+    #[default]
+    Json,
+    /// One row per failing seed. Not versioned and not an interface to build
+    /// on - it is for a person with a spreadsheet who wants to know which
+    /// invariant is costing them the most seeds, without writing a parser to
+    /// find out.
+    Csv,
 }
 
 /// How results are printed.
@@ -136,14 +153,14 @@ pub enum Command {
         #[arg(long)]
         max_failures: Option<usize>,
 
-        /// Write a JUnit XML report here.
-        #[arg(long)]
-        junit: Option<PathBuf>,
-
         /// Write the machine-readable sweep report here. `-` writes it to
         /// stdout.
         #[arg(long)]
         report: Option<PathBuf>,
+
+        /// Which document `--report` writes.
+        #[arg(long, value_enum, default_value_t = ReportFormat::Json)]
+        report_format: ReportFormat,
 
         /// Run one slice of the seed space, written as `7/64`.
         ///
@@ -211,8 +228,8 @@ impl Cli {
                 start,
                 parallel,
                 max_failures,
-                junit,
                 report,
+                report_format,
                 shard,
                 corpus,
             } => {
@@ -221,8 +238,8 @@ impl Cli {
                     Seeds::new(start, seeds),
                     parallel,
                     max_failures,
-                    junit.as_deref(),
                     report.as_deref(),
+                    report_format,
                     shard.as_deref(),
                     corpus.as_deref(),
                 )
@@ -426,8 +443,8 @@ async fn fuzz(
     seeds: Seeds,
     parallel: usize,
     max_failures: Option<usize>,
-    junit_out: Option<&Path>,
     report_out: Option<&Path>,
+    report_format: ReportFormat,
     shard: Option<&str>,
     corpus: Option<&Path>,
 ) -> Result<Status> {
@@ -468,12 +485,13 @@ async fn fuzz(
         }
     }
 
-    if let Some(destination) = junit_out {
-        write_junit(&sweep, &document, destination)?;
-    }
-
     if let Some(destination) = report_out {
-        write_document(&document.to_json(), destination, "sweep report")?;
+        let (body, what) = match report_format {
+            ReportFormat::Json => (document.to_json(), "sweep report"),
+            ReportFormat::Csv => (document.to_csv(), "sweep csv"),
+        };
+
+        write_document(&body, destination, what)?;
     }
 
     Ok(if sweep.passed() {
@@ -659,45 +677,6 @@ fn write_document(body: &str, destination: &Path, what: &str) -> Result<()> {
 
     std::fs::write(destination, body)?;
     eprintln!("{what} written to {}", destination.display());
-
-    Ok(())
-}
-
-fn write_junit(
-    sweep: &FuzzReport,
-    document: &misorder::report::SweepReport,
-    destination: &Path,
-) -> Result<()> {
-    let cases: Vec<junit::Case> = document
-        .failures
-        .iter()
-        .map(|report| junit::Case {
-            name: format!("seed-{}", report.seed),
-            elapsed: std::time::Duration::from_millis(report.elapsed_ms),
-            message: report
-                .violations
-                .first()
-                .map(|violation| format!("{}: {}", violation.invariant, violation.detail)),
-            body: report.reproducer.clone(),
-        })
-        .collect();
-
-    // A pass still produces a report, with one case standing for the whole
-    // sweep. A CI job whose report file is missing on success has to special
-    // case it, and the special case is where the "no tests ran" bug lives.
-    let cases = if cases.is_empty() {
-        vec![junit::Case {
-            name: format!("seeds-{}", sweep.seeds_run),
-            elapsed: sweep.elapsed,
-            message: None,
-            body: None,
-        }]
-    } else {
-        cases
-    };
-
-    std::fs::write(destination, junit::render(&sweep.scenario, &cases))?;
-    eprintln!("junit report written to {}", destination.display());
 
     Ok(())
 }

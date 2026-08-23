@@ -1,0 +1,171 @@
+# One subscription's billing lifecycle, run end to end.
+#
+# This is the scenario the tutorial uses, and it is the one to run first:
+# everything it needs is in this repository and none of it is Docker.
+#
+#   cargo build --workspace
+#   mis check examples/stripe_invoice_lifecycle.toml
+#   mis run   examples/stripe_invoice_lifecycle.toml --seed 1
+#   mis fuzz  examples/stripe_invoice_lifecycle.toml --seeds 200
+#
+# ── The premise ───────────────────────────────────────────────────────────────
+#
+# A customer subscribes, misses a payment, pays, misses another, and cancels.
+# Stripe generates those five events in that order and posts each one to
+# /webhooks/stripe. The handler in apps/billing-demo applies them as they
+# arrive, which is correct for the ordering it was written against and is how
+# they arrive every time you test it.
+#
+# Stripe does three things that break it, and documents all three:
+#
+#   events arrive out of generation order
+#   the same event can be delivered more than once
+#   an unanswered delivery is retried for up to three days
+#
+# So a payment_failed generated *before* the cancellation can be applied
+# *after* it, and a cancelled customer goes back to past_due and gets dunned.
+# See examples/corpus/stripe.toml for the sources.
+#
+# ── What is deliberately not here ─────────────────────────────────────────────
+#
+# No [deps] block, so no Docker: this service owns its own state and a scenario
+# that needs no container should not need a daemon to run.
+# examples/stripe_webhook_ordering.toml is the same story written against a real
+# Postgres, with the invariants as SQL. Read them side by side - what changes is
+# the plumbing, not the scenario.
+
+name = "stripe_invoice_lifecycle"
+
+[[system]]
+run = "./target/debug/billing-demo"
+
+# misorder picks a free port per run and sets this variable to it, then puts the
+# ingress proxy in front. Per run rather than pinned, because `mis fuzz
+# --parallel 16` starts sixteen of these at once and sixteen processes cannot
+# share a port.
+listen_env = "PORT"
+
+# The ingress readiness signal. The other three are detected from traffic
+# crossing a proxy, and a service waiting for its first webhook makes none.
+ready_when = "http_listening"
+
+[run]
+# Five deliveries against a loopback service. A scenario that needed longer
+# than this has hung rather than been slow.
+timeout = "20s"
+quiesce_after = "150ms"
+
+# ── The workload ──────────────────────────────────────────────────────────────
+#
+# In the order Stripe generated them. What order the handler *sees* is the
+# scheduler's to decide, which is the entire point: writing them out of order by
+# hand tests one ordering, and the ordering that breaks you is not the one you
+# thought of.
+#
+# These are consecutive, so they go out on one connection without waiting for
+# each response. That is what gives `reorder` two requests in flight to swap.
+# Putting a `wait` between them would split the connection and cost exactly the
+# reordering that finds the bug.
+
+[[workload]]
+post = "/webhooks/stripe"
+
+[workload.payload]
+id = "evt_1"
+type = "customer.subscription.created"
+created = 1_760_000_000
+
+[workload.payload.data.object]
+id = "sub_1"
+status = "incomplete"
+
+[[workload]]
+post = "/webhooks/stripe"
+
+[workload.payload]
+id = "evt_2"
+type = "invoice.payment_failed"
+created = 1_760_000_060
+
+[workload.payload.data.object]
+id = "in_1"
+subscription = "sub_1"
+amount_due = 4900
+
+# Delivered twice, and that is not a fault: Stripe delivers at least once and
+# says so, so the second copy is ordinary traffic. Each repetition is its own
+# set of forks, so the two copies can interleave.
+[[workload]]
+post = "/webhooks/stripe"
+repeat = 2
+
+[workload.payload]
+id = "evt_3"
+type = "invoice.payment_succeeded"
+created = 1_760_000_120
+
+[workload.payload.data.object]
+id = "in_1"
+subscription = "sub_1"
+amount_paid = 4900
+
+[[workload]]
+post = "/webhooks/stripe"
+
+[workload.payload]
+id = "evt_4"
+type = "invoice.payment_failed"
+created = 1_760_000_180
+
+[workload.payload.data.object]
+id = "in_2"
+subscription = "sub_1"
+amount_due = 4900
+
+[[workload]]
+post = "/webhooks/stripe"
+
+[workload.payload]
+id = "evt_5"
+type = "customer.subscription.deleted"
+created = 1_760_000_240
+
+[workload.payload.data.object]
+id = "sub_1"
+status = "canceled"
+
+# ── The faults ────────────────────────────────────────────────────────────────
+#
+# Stripe's three documented behaviours in misorder's vocabulary. `reorder` and
+# `delay` are "events arrive out of generation order"; `connection_drop` is the
+# delivery that goes unanswered, which is the reason a late arrival exists at
+# all.
+[faults]
+enabled = ["reorder", "delay", "connection_drop"]
+
+# ── What must be true ─────────────────────────────────────────────────────────
+
+# A webhook that is neither answered nor failed is the worst outcome available:
+# the service does not know whether it applied the event, and Stripe retries
+# regardless.
+[[invariants]]
+builtin = "every_request_reaches_terminal_state"
+
+[[invariants]]
+builtin = "eventually_quiescent"
+
+# The domain assertions, asked of the service rather than of a database. Each
+# path answers a question about the *bad* state and returns the offending rows,
+# so `expect = "empty"` needs no knowledge of how many rows a correct run
+# produces and stays a test of the service rather than of this file.
+[[invariants]]
+name = "terminal_state_is_final"
+check = "http"
+query = "/checks/reopened_after_cancel"
+expect = "empty"
+
+[[invariants]]
+name = "no_double_charge"
+check = "http"
+query = "/checks/double_settled"
+expect = "empty"

@@ -48,6 +48,13 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      # The worked example is documentation that runs. `cargo test` does not
+      # execute examples and `--all-targets` only compiles them, so without this
+      # step it could stop finding the bug it exists to demonstrate and nothing
+      # would say so. It exits non-zero if the ordering goes unfound.
+      - name: Worked example finds its bug
+        run: cargo run -p misorder --example stripe_webhook_ordering
+
       # One feature per protocol, and a downstream embedder may enable exactly
       # one. A missing `#[cfg]` compiles fine with the default set and fails
       # only for the person who turned the others off, which is the worst place

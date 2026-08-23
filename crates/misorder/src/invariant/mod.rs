@@ -69,6 +69,15 @@ pub struct CheckContext {
     /// Connection string for the scenario's Postgres, if it declared one.
     pub postgres_url: Option<String>,
 
+    /// Where the service under test is listening, for `check = "http"`.
+    ///
+    /// The service's own address rather than the proxy's, and deliberately: a
+    /// terminal check asks the service what its state ended up as, and routing
+    /// that question through the fault injector could drop it, delay it past
+    /// the report, or answer it out of order. The check would then be measuring
+    /// the harness.
+    pub service_url: Option<String>,
+
     /// Total length of the run.
     pub elapsed: std::time::Duration,
 }

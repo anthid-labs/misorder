@@ -30,13 +30,18 @@ vendor = "stripe"
 name = "same_event_delivered_more_than_once"
 protocol = "http"
 describe = "An endpoint can receive the same event id twice, so a handler that deduplicates on the object id instead of the event id applies it twice."
-provenance = { kind = "documented", url = "https://docs.stripe.com/webhooks" }
+# "Webhook endpoints might occasionally receive the same event more than once."
+provenance = { kind = "documented", url = "https://docs.stripe.com/webhooks#handle-duplicate-events" }
 
 [[behaviors]]
 name = "events_arrive_out_of_generation_order"
 protocol = "http"
 describe = "Events are not delivered in the order they were generated, so a later event for one object can land before an earlier one."
-provenance = { kind = "documented", url = "https://docs.stripe.com/webhooks" }
+# The strongest `documented` claim in this file, and worth the exact anchor: Stripe
+# states it as a property of the system rather than as a caveat - "Stripe doesn't
+# guarantee the delivery of events in the order that they're generated" - under
+# Event delivery behaviors, with a worked example of a subscription generating four.
+provenance = { kind = "documented", url = "https://docs.stripe.com/webhooks#event-ordering" }
 
 [[behaviors]]
 name = "events_carry_no_sequence_number"
@@ -50,4 +55,6 @@ provenance = { kind = "documented", url = "https://docs.stripe.com/api/events/ob
 name = "failed_delivery_retried_for_days"
 protocol = "http"
 describe = "A delivery that is not answered with a 2xx is retried with backoff over the following days, so one request the service dropped returns long after the run that dropped it."
-provenance = { kind = "documented", url = "https://docs.stripe.com/webhooks" }
+# "for up to three days with an exponential back off in live mode" - which is the
+# number that makes this behaviour need a virtual clock rather than a longer timeout.
+provenance = { kind = "documented", url = "https://docs.stripe.com/webhooks#automatic-retries" }

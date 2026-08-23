@@ -1,0 +1,24 @@
+[package]
+name = "billing-demo"
+description = "A deliberately naive Stripe webhook handler, as the system under test in the worked example."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+# Not published. This is the thing the tutorial runs misorder against, not a
+# library anyone should depend on - it is wrong on purpose.
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "billing-demo"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }

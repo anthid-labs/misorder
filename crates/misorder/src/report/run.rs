@@ -291,6 +291,67 @@ impl SweepReport {
         out
     }
 
+    /// One row per failing seed, as CSV.
+    ///
+    /// A different reader from [`SweepReport::to_json`], not a worse one. The
+    /// JSON is the document a service stores and versions; this is what someone
+    /// opens in a spreadsheet or loads into a notebook to ask "which invariant
+    /// costs us the most seeds" without writing a parser first.
+    ///
+    /// Only failures get a row. A sweep does not keep passing runs - it counts
+    /// them - so a row per seed is not available to write and inventing one
+    /// would be a file whose row count disagrees with `seeds_run`.
+    ///
+    /// The scenario and shard repeat on every row on purpose. Sharding is the
+    /// documented way to split a sweep across machines, so `cat shard-*.csv`
+    /// is the obvious next thing anyone does, and a header-only-once format
+    /// makes that concatenation wrong in a way nobody notices until the numbers
+    /// are already in a report.
+    pub fn to_csv(&self) -> String {
+        let mut out = String::from(
+            "scenario,shard,seed,signature,invariant,detail,decisions_active,\
+             decisions_recorded,faults_used,elapsed_ms\n",
+        );
+
+        let shard = match &self.shard {
+            Some(shard) => format!("{}/{}", shard.index, shard.count),
+            None => String::new(),
+        };
+
+        for failure in &self.failures {
+            let violation = failure.violations.first();
+
+            let row = [
+                self.scenario.name.clone(),
+                shard.clone(),
+                failure.seed.to_string(),
+                failure.signature.clone().unwrap_or_default(),
+                violation.map(|v| v.invariant.clone()).unwrap_or_default(),
+                violation.map(|v| v.detail.clone()).unwrap_or_default(),
+                failure.decisions.active.to_string(),
+                failure.decisions.recorded.to_string(),
+                failure
+                    .faults
+                    .used
+                    .iter()
+                    .map(|fault| fault.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                failure.elapsed_ms.to_string(),
+            ];
+
+            out.push_str(
+                &row.iter()
+                    .map(|field| csv_field(field))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            out.push('\n');
+        }
+
+        out
+    }
+
     /// Groups failing runs by signature, most-found first.
     pub fn group(failures: &[RunReport]) -> Vec<SignatureGroup> {
         let mut groups: Vec<SignatureGroup> = Vec::new();
@@ -351,9 +412,47 @@ pub(crate) fn millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+/// One CSV field, quoted when it has to be.
+///
+/// RFC 4180: quote when the value contains a comma, a quote or a newline, and
+/// double any quote inside. An invariant's `detail` is a sentence written by
+/// whoever wrote the invariant, so all three are ordinary rather than
+/// hypothetical, and a file that splits a sentence across two columns is worse
+/// than no file - it is wrong quietly.
+fn csv_field(value: &str) -> String {
+    if !value.contains([',', '"', '\n', '\r']) {
+        return value.to_string();
+    }
+
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sweep with nothing in it, for the CSV tests to fill in.
+    fn sweep() -> SweepReport {
+        SweepReport {
+            format: FORMAT_VERSION,
+            engine: Engine::default(),
+            scenario: ScenarioRef {
+                name: "dead_letter".to_string(),
+                digest: None,
+            },
+            shard: None,
+            seed_start: 0,
+            seed_count: 100,
+            seeds_run: 100,
+            passed: 98,
+            violated: 2,
+            incomplete: 0,
+            distinct_failures: Vec::new(),
+            failures: Vec::new(),
+            started_at: now_rfc3339(),
+            elapsed_ms: 5,
+        }
+    }
 
     fn failing(seed: u64, signature: &str, invariant: &str) -> RunReport {
         RunReport {
@@ -466,5 +565,47 @@ mod tests {
 
         assert!(report.passed());
         assert!(!report.to_json().contains("signature"));
+    }
+
+    /// A header, then one row per failing seed. Passing seeds have no row
+    /// because a sweep does not keep them.
+    #[test]
+    fn a_csv_sweep_has_one_row_per_failure() {
+        let mut report = sweep();
+        report.failures = vec![failing(7, "aaaa", "no_delivery_after_ack")];
+
+        let csv = report.to_csv();
+        let lines: Vec<_> = csv.lines().collect();
+
+        assert_eq!(lines.len(), 2, "a header and one failure");
+        assert!(lines[0].starts_with("scenario,shard,seed,"));
+        assert!(lines[1].contains(",7,aaaa,no_delivery_after_ack,"));
+    }
+
+    /// Every row carries the scenario and shard, so `cat shard-*.csv` is not a
+    /// file that silently loses which machine produced which rows.
+    #[test]
+    fn every_row_repeats_the_shard_so_shards_concatenate() {
+        let mut report = sweep();
+        report.shard = Some(ShardRef {
+            index: 7,
+            count: 64,
+        });
+        report.failures = vec![failing(7, "aaaa", "x"), failing(9, "bbbb", "y")];
+
+        let csv = report.to_csv();
+
+        assert_eq!(csv.matches(",7/64,").count(), 2);
+    }
+
+    /// An invariant's detail is a sentence somebody wrote, so commas, quotes
+    /// and newlines in it are ordinary. A file that split one across two
+    /// columns would be wrong quietly.
+    #[test]
+    fn a_detail_with_punctuation_stays_one_field() {
+        assert_eq!(csv_field("plain"), "plain");
+        assert_eq!(csv_field("a,b"), "\"a,b\"");
+        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_field("two\nlines"), "\"two\nlines\"");
     }
 }

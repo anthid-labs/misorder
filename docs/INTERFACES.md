@@ -94,6 +94,17 @@ seam for anything that stores, compares, or comments on results. It carries the
 verdict, the violations, the failure signature, what was permitted versus what
 was used, the scenario digest, and which engine build produced it.
 
+`mis fuzz --report-format csv` writes the same sweep as one row per failing
+seed. It is **not** one of the interfaces this document promises: it carries no
+format version, it is free to gain a column in any release, and nothing should
+parse it to make a decision. It exists because "which invariant is costing us
+the most seeds" is a spreadsheet question, and answering it should not require
+writing a JSON consumer first.
+
+The scenario and shard repeat on every row, so `cat shard-*.csv` from a
+distributed sweep is a valid file rather than one that has quietly lost which
+machine produced which rows.
+
 ### CLI and exit codes
 
 | Code | Meaning                               |
