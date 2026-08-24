@@ -38,6 +38,45 @@ pub mod postgres;
 #[cfg(feature = "redis")]
 pub mod redis;
 
+/// Every protocol an adapter is written for, compiled in or not.
+///
+/// Separate from [`speaks`] because "we have not written that codec" and "your
+/// build turned it off" are different problems with different fixes, and a
+/// caller that could not tell them apart would report the first when it meant
+/// the second.
+pub const ADAPTERS: &[&str] = &["nats", "postgres", "redis", "http"];
+
+/// Whether this build carries the adapter for a protocol.
+///
+/// Beside the module gates above on purpose. Two matches on the same feature
+/// set, in two files, is two things to remember to change.
+pub fn speaks(protocol: &str) -> bool {
+    match protocol {
+        "nats" => cfg!(feature = "nats"),
+        "postgres" => cfg!(feature = "postgres"),
+        "redis" => cfg!(feature = "redis"),
+        "http" => cfg!(feature = "http"),
+        // Not a protocol with an adapter at all. `matches!` would read the same
+        // and lose the one-line-per-feature shape that makes a missing arm
+        // visible next to the module gates above.
+        #[allow(clippy::match_like_matches_macro)]
+        _ => false,
+    }
+}
+
+/// Why a protocol cannot be proxied, in the words that fit the actual reason.
+pub fn unsupported(protocol: &str) -> crate::error::Error {
+    if ADAPTERS.contains(&protocol) {
+        crate::error::Error::Unsupported(format!(
+            "`{protocol}` needs the `{protocol}` feature, and this build does not have it"
+        ))
+    } else {
+        crate::error::Error::Unsupported(format!(
+            "`{protocol}` cannot be proxied yet: its wire codec is not written"
+        ))
+    }
+}
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Mutex;

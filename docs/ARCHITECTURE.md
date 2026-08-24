@@ -284,13 +284,13 @@ so neither goes.
 ## 7. The worked example, concretely
 
 [`examples/stripe_invoice_lifecycle.toml`](../examples/stripe_invoice_lifecycle.toml)
-against [`apps/billing-demo`](../apps/billing-demo). One reorder, at one fork.
+against [`billing_demo`](../apps/demos/src/bins/billing.rs). One reorder, at one fork.
 
 ```mermaid
 sequenceDiagram
     participant D as workload driver
     participant P as proxy
-    participant S as billing-demo
+    participant S as billing_demo
     participant C as invariants
 
     Note over D,P: six deliveries, pipelined on one connection

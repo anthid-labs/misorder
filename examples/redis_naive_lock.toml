@@ -40,7 +40,7 @@
 name = "redis_naive_lock"
 
 [[system]]
-run = "./target/debug/redis-worker-demo"
+run = "./target/debug/redis_demo"
 
 # It makes no outbound traffic before it is asked to, and it is asked to
 # immediately: there is no readiness signal to wait for that is not the work

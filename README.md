@@ -303,7 +303,7 @@ Twelve seeds found it and they are **one** failure, not twelve — grouped by th
 signature of the shape, which is what stops a sweep reading as a wall of red.
 
 The pieces: [`examples/stripe_invoice_lifecycle.toml`](examples/stripe_invoice_lifecycle.toml)
-is the scenario, [`apps/billing-demo`](apps/billing-demo) is the service under
+is the scenario, [`apps/demos`](apps/demos) builds the service under
 test, and [`examples/corpus/stripe.toml`](examples/corpus/stripe.toml) is where
 the claims about Stripe's behaviour come from, each with its source.
 
@@ -350,7 +350,7 @@ whole exchange crosses the wire, so the proxy sees it without knowing anything
 about the service.
 
 The worker reads `REDIS_URL` and is never told it is not talking to Redis.
-[`apps/redis-worker-demo`](apps/redis-worker-demo) is the service;
+[`apps/demos`](apps/demos) builds the service (`redis_demo`);
 [`examples/redis_naive_lock.toml`](examples/redis_naive_lock.toml) is the
 scenario.
 
@@ -589,8 +589,7 @@ schedule that runs in under a second and either reproduces or does not.
 | ----------------------- | ------------------------------------------------------------- |
 | `crates/misorder`       | The library: scenario, orchestrator, proxy, schedule, trace, invariants, shrinker. |
 | `apps/misorder-cli`     | The `mis` binary: argument parsing, logging setup, exit codes. |
-| `apps/billing-demo`     | The service under test in the ingress example. Wrong on purpose. |
-| `apps/redis-worker-demo`| The service under test in the egress example. Also wrong on purpose. |
+| `apps/demos`            | The services under test: `billing_demo` for the ingress example, `redis_demo` for the egress one. Both wrong on purpose. |
 | `examples/`             | Scenario files, including the one in this README, and a corpus. |
 | `docker/`               | Dockerfile and a compose example.                              |
 | `docs/ARCHITECTURE.md`  | How the components fit, with a flowchart for each.             |
@@ -627,13 +626,22 @@ than for you:
 
 ```bash
 for feature in nats postgres redis http; do
-  cargo check -p misorder --no-default-features --features "$feature"
+  cargo check -p misorder     --no-default-features --features "$feature"
+  cargo check -p misorder-cli --no-default-features --features "$feature"
 done
 ```
 
 One feature per protocol, and a downstream embedder may enable exactly one. A
 missing `#[cfg]` compiles fine with the default set and breaks only for the
 person who turned the others off, which is the worst place to find it.
+
+The CLI is in that loop for a second reason. It forwards each feature to the
+engine by hand, and the workspace dependency sets `default-features = false`, so
+that list is the whole of what `mis` can speak. A protocol added to the library
+and not to the list compiles, tests green, and is unreachable from the command
+anybody actually runs. `the_cli_forwards_every_engine_feature` asserts the two
+lists match, because a check that only lives in CI is one you find out about
+after you have pushed.
 
 ## Roadmap
 

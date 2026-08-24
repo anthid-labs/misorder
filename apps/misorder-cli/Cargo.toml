@@ -23,10 +23,16 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+# One per protocol, forwarded to the engine. The workspace dependency on
+# `misorder` sets `default-features = false`, so a protocol the engine has and
+# this list does not is a protocol `mis` cannot speak: the adapter is compiled
+# out of the binary and the scenario fails at run time naming a feature nobody
+# knew was off. `redis` was missing here for exactly that reason.
 [features]
-default = ["nats", "postgres", "http"]
+default = ["nats", "postgres", "redis", "http"]
 nats = ["misorder/nats"]
 postgres = ["misorder/postgres"]
+redis = ["misorder/redis"]
 http = ["misorder/http"]
 
 [dependencies]

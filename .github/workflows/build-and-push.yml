@@ -74,9 +74,17 @@ jobs:
         run: |
           set -euo pipefail
           cargo check -p misorder --no-default-features
+          cargo check -p misorder-cli --no-default-features
           for feature in nats postgres redis http; do
             echo "::group::misorder --features $feature"
             cargo check -p misorder --no-default-features --features "$feature"
+            echo "::endgroup::"
+            # The CLI too, and not only because it might not compile. It
+            # forwards each feature to the engine by hand, and a protocol
+            # missing from that list is one `mis` silently cannot speak while
+            # the library builds fine. That is how `redis` shipped compiled out.
+            echo "::group::misorder-cli --features $feature"
+            cargo check -p misorder-cli --no-default-features --features "$feature"
             echo "::endgroup::"
           done
 

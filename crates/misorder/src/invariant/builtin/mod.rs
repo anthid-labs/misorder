@@ -19,6 +19,15 @@
 //! `mis check` then shows a user exactly what coverage exists today, instead of
 //! reporting an unimplemented invariant as an unknown name and leaving them to
 //! guess whether they typed it wrong.
+//!
+//! # Written and compiled in are different questions
+//!
+//! [`Status`] says whether the code exists. [`compiled_in`] says whether this
+//! binary has it, which is a build decision and not a property of the
+//! catalogue: the registry is one table for every feature combination, so
+//! `Status::Implemented` alone would have `mis check` list an invariant that
+//! `mis run` then refuses. Both are reported, because "not written yet" and
+//! "your build turned it off" need different actions from the reader.
 
 #[cfg(feature = "http")]
 pub mod http;
@@ -144,6 +153,25 @@ pub fn entry(name: &str) -> Option<&'static Entry> {
     REGISTRY.iter().find(|entry| entry.name == name)
 }
 
+/// Whether this build carries the adapter an entry's dependency needs.
+///
+/// Delegates to [`crate::proxy::speaks`], so the answer cannot drift from what
+/// actually compiled. A dependency with no adapter of its own (`"any"`) is
+/// always in: nothing had to be built for it.
+pub fn compiled_in(dependency: &str) -> bool {
+    // Asked of the proxy layer rather than answered again here. An invariant is
+    // available exactly when the adapter whose semantics it encodes is, and two
+    // matches on the same feature set would eventually disagree.
+    !crate::proxy::ADAPTERS.contains(&dependency) || crate::proxy::speaks(dependency)
+}
+
+impl Entry {
+    /// Written, and present in this binary. What `mis run` can actually build.
+    pub fn available(&self) -> bool {
+        self.status == Status::Implemented && compiled_in(self.dependency)
+    }
+}
+
 /// Constructs a built-in from its scenario block.
 pub fn build(spec: &InvariantSpec) -> Result<Box<dyn Invariant>> {
     let name = spec
@@ -161,6 +189,16 @@ pub fn build(spec: &InvariantSpec) -> Result<Box<dyn Invariant>> {
     if entry.status == Status::Planned {
         return Err(Error::Unsupported(format!(
             "builtin invariant `{name}` is specified but not implemented yet"
+        )));
+    }
+
+    // Checked here rather than left to the match's fallthrough, so the message
+    // names the feature to turn on instead of saying that one is missing.
+    if !compiled_in(entry.dependency) {
+        return Err(Error::Unsupported(format!(
+            "builtin invariant `{name}` needs the `{}` feature, and this build \
+             does not have it",
+            entry.dependency
         )));
     }
 
@@ -218,19 +256,10 @@ mod tests {
     /// `Implemented` is a claim about the source, not about every build of it.
     /// A build with one feature on still refuses the other adapters' invariants,
     /// and refuses them correctly, with a message naming the missing feature.
-    fn compiled_in(dependency: &str) -> bool {
-        match dependency {
-            "nats" => cfg!(feature = "nats"),
-            "postgres" => cfg!(feature = "postgres"),
-            "http" => cfg!(feature = "http"),
-            _ => true,
-        }
-    }
-
     #[test]
     fn every_implemented_entry_builds() {
         for entry in REGISTRY {
-            if entry.status != Status::Implemented || !compiled_in(entry.dependency) {
+            if !entry.available() {
                 continue;
             }
 

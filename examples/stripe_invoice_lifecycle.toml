@@ -12,7 +12,7 @@
 #
 # A customer subscribes, misses a payment, pays, misses another, and cancels.
 # Stripe generates those five events in that order and posts each one to
-# /webhooks/stripe. The handler in apps/billing-demo applies them as they
+# /webhooks/stripe. The handler in apps/demos/src/bins/billing.rs applies them as they
 # arrive, which is correct for the ordering it was written against and is how
 # they arrive every time you test it.
 #
@@ -37,7 +37,7 @@
 name = "stripe_invoice_lifecycle"
 
 [[system]]
-run = "./target/debug/billing-demo"
+run = "./target/debug/billing_demo"
 
 # misorder picks a free port per run and sets this variable to it, then puts the
 # ingress proxy in front. Per run rather than pinned, because `mis fuzz

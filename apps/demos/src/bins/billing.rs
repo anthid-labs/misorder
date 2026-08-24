@@ -181,9 +181,9 @@ async fn main() {
 
     let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
-        .unwrap_or_else(|error| panic!("billing-demo could not bind port {port}: {error}"));
+        .unwrap_or_else(|error| panic!("billing_demo could not bind port {port}: {error}"));
 
-    eprintln!("billing-demo listening on 127.0.0.1:{port}");
+    eprintln!("billing_demo listening on 127.0.0.1:{port}");
 
     let billing = Arc::new(Mutex::new(Billing::default()));
 

@@ -150,7 +150,7 @@ fn address() -> String {
 async fn main() {
     let address = address();
 
-    eprintln!("redis-worker-demo talking to {address}");
+    eprintln!("redis_demo talking to {address}");
 
     let mut worker_a = Redis::connect(&address)
         .await

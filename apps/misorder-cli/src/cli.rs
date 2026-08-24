@@ -388,7 +388,26 @@ async fn check(path: &Path, corpus: Option<&Path>, style: &Style) -> Result<Stat
         if declared.is_empty() {
             "none".to_string()
         } else {
-            declared.join(", ")
+            declared
+                .iter()
+                .map(|name| {
+                    // A dependency whose adapter was compiled out cannot be
+                    // proxied, and the run fails at the point it tries. Saying
+                    // so here is the whole job of `check`.
+                    if builtin::compiled_in(name) {
+                        name.to_string()
+                    } else {
+                        format!(
+                            "{name} ({})",
+                            style.paint(
+                                style.warn,
+                                format!("no adapter in this build: needs the `{name}` feature"),
+                            )
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         }
     );
 
@@ -432,11 +451,21 @@ async fn check(path: &Path, corpus: Option<&Path>, style: &Style) -> Result<Stat
                 // exists: a scenario permitting four faults and naming one
                 // invariant reads as thorough, and this is where you find out
                 // how much of that is real before spending an hour of compute.
-                let status = match entry.map(|entry| entry.status) {
-                    Some(builtin::Status::Implemented) => style.paint(style.good, "builtin"),
-                    Some(builtin::Status::Planned) => {
+                let status = match entry {
+                    Some(entry) if entry.available() => style.paint(style.good, "builtin"),
+                    Some(entry) if entry.status == builtin::Status::Planned => {
                         style.paint(style.warn, "builtin, NOT IMPLEMENTED YET")
                     }
+                    // Written, and not in this binary. A different problem from
+                    // the one above and it has a different fix, so it gets its
+                    // own line rather than being folded into "not implemented".
+                    Some(entry) => style.paint(
+                        style.warn,
+                        format!(
+                            "builtin, NOT IN THIS BUILD: needs the `{}` feature",
+                            entry.dependency
+                        ),
+                    ),
                     None => style.paint(style.bad, "unknown"),
                 };
 
@@ -818,6 +847,142 @@ fn write_document(body: &str, destination: &Path, what: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Every binary an example runs is one this workspace actually builds.
+    ///
+    /// A `[[bin]]` rename is invisible to the examples: they name a path under
+    /// `target/debug`, and the old binary sits there from the previous build
+    /// until someone clones the repository fresh. `redis_naive_lock` and
+    /// `stripe_invoice_lifecycle` both shipped pointing at names that no longer
+    /// existed, and both ran fine on the machine that renamed them.
+    ///
+    /// The scenarios whose services are not written yet are listed rather than
+    /// skipped by heuristic, so an aspirational path stays distinguishable from
+    /// a typo.
+    #[test]
+    fn every_example_runs_a_binary_this_workspace_builds() {
+        /// Named in an example, not built by anything here yet. Each of these
+        /// scenarios documents the orchestration it is waiting on.
+        const NOT_BUILT_YET: &[&str] = &["ledger", "billing", "oms"];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("the workspace root is two levels above this crate")
+            .to_path_buf();
+
+        // Every `[[bin]]` name any member declares.
+        let mut built = Vec::new();
+        for entry in std::fs::read_dir(root.join("apps")).expect("apps/ is readable") {
+            let manifest = entry.expect("a readable entry").path().join("Cargo.toml");
+
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                continue;
+            };
+
+            for line in text.lines() {
+                if let Some(rest) = line.trim().strip_prefix("name = ") {
+                    built.push(rest.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+
+        assert!(
+            built.contains(&"redis_demo".to_string()),
+            "found: {built:?}"
+        );
+
+        let mut missing = Vec::new();
+
+        for entry in std::fs::read_dir(root.join("examples")).expect("examples/ is readable") {
+            let path = entry.expect("a readable entry").path();
+
+            if path.extension().is_none_or(|ext| ext != "toml") {
+                continue;
+            }
+
+            let text = std::fs::read_to_string(&path).expect("a readable scenario");
+
+            for line in text.lines() {
+                let line = line.trim();
+
+                let Some(rest) = line.strip_prefix("run = ") else {
+                    continue;
+                };
+
+                let command = rest.trim().trim_matches('"');
+
+                let Some(name) = command.strip_prefix("./target/debug/") else {
+                    continue;
+                };
+
+                if built.contains(&name.to_string()) || NOT_BUILT_YET.contains(&name) {
+                    continue;
+                }
+
+                missing.push(format!(
+                    "{}: runs `{name}`, which no [[bin]] in this workspace declares",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+        }
+
+        assert!(missing.is_empty(), "{}", missing.join("\n"));
+    }
+
+    /// Every protocol the engine has is one this binary can forward.
+    ///
+    /// The workspace dependency on `misorder` sets `default-features = false`,
+    /// so this crate's `[features]` list is the whole of what `mis` can speak.
+    /// A protocol added to the library and not to that list compiles, tests
+    /// green, and is unreachable from the command anybody runs: `mis check`
+    /// resolves the scenario, `mis run` refuses it, and the two disagree.
+    /// `redis` shipped that way.
+    ///
+    /// Reads both manifests as text rather than asking cargo, so the test is
+    /// hermetic and runs in the same second as everything else here.
+    #[test]
+    fn the_cli_forwards_every_engine_feature() {
+        fn features(manifest: &str) -> Vec<String> {
+            let mut names = Vec::new();
+            let mut inside = false;
+
+            for line in manifest.lines() {
+                let line = line.trim();
+
+                if line.starts_with('[') {
+                    inside = line == "[features]";
+                    continue;
+                }
+
+                if !inside || line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+
+                if let Some((name, _)) = line.split_once('=') {
+                    let name = name.trim();
+
+                    // `default` is a set of the others, not a protocol.
+                    if name != "default" {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+
+            names.sort();
+            names
+        }
+
+        let engine = features(include_str!("../../../crates/misorder/Cargo.toml"));
+        let cli = features(include_str!("../Cargo.toml"));
+
+        assert!(!engine.is_empty(), "the engine manifest parsed to nothing");
+        assert_eq!(
+            engine, cli,
+            "misorder-cli must forward every misorder feature, or `mis` cannot speak \
+             the protocol at all"
+        );
+    }
+
     use super::*;
     use clap::Parser;
 

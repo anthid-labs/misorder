@@ -641,31 +641,8 @@ impl Runner {
         let mut injected = Vec::new();
 
         for (protocol, upstream) in self.scenario.deps.external() {
-            // Annotated because a build with no protocol features has only the
-            // diverging arm below, and the match then has no type to infer.
-            let endpoint: crate::proxy::Endpoint = match protocol {
-                #[cfg(feature = "redis")]
-                "redis" => {
-                    let mut adapter = crate::proxy::redis::RedisAdapter::new();
-                    let endpoint = adapter.bind(upstream).await?;
-
-                    let context = ProxyContext::new(
-                        scheduler.clone(),
-                        upstream.to_string(),
-                        events.clone(),
-                        cancel.clone(),
-                    );
-
-                    proxies.push(tokio::spawn(async move { adapter.serve(context).await }));
-
-                    endpoint
-                }
-                other => {
-                    return Err(Error::Unsupported(format!(
-                        "`{other}` cannot be proxied yet: its wire codec is not written"
-                    )));
-                }
-            };
+            let endpoint =
+                Self::bind_egress(protocol, upstream, proxies, scheduler, events, cancel).await?;
 
             tracing::debug!(
                 protocol,
@@ -678,6 +655,49 @@ impl Runner {
         }
 
         Ok(injected)
+    }
+
+    /// Puts one adapter in front of one dependency.
+    ///
+    /// Its own function so the dispatch is the whole body: a build with no
+    /// protocol features compiles this down to the error arm, with no binding
+    /// left over to warn about.
+    ///
+    /// Gated on the set of protocols with an egress arm below, in the same way
+    /// the imports at the top of this file are: with none of them compiled in,
+    /// every parameter here is for an arm that does not exist. Add a protocol
+    /// to the `any(..)` when you add its arm.
+    #[cfg_attr(not(any(feature = "redis")), allow(unused_variables))]
+    async fn bind_egress(
+        protocol: &str,
+        upstream: &str,
+        proxies: &mut Vec<tokio::task::JoinHandle<Result<()>>>,
+        scheduler: &Scheduler,
+        events: &EventSink,
+        cancel: &CancellationToken,
+    ) -> Result<crate::proxy::Endpoint> {
+        match protocol {
+            #[cfg(feature = "redis")]
+            "redis" => {
+                let mut adapter = crate::proxy::redis::RedisAdapter::new();
+                let endpoint = adapter.bind(upstream).await?;
+
+                let context = ProxyContext::new(
+                    scheduler.clone(),
+                    upstream.to_string(),
+                    events.clone(),
+                    cancel.clone(),
+                );
+
+                proxies.push(tokio::spawn(async move { adapter.serve(context).await }));
+
+                Ok(endpoint)
+            }
+            // Names the feature when the codec exists and this build left it
+            // out, which is a different sentence from "not written yet" and
+            // sends the reader somewhere different.
+            other => Err(crate::proxy::unsupported(other)),
+        }
     }
 
     /// Binds the ingress HTTP proxy, when the workload has anything to post.
