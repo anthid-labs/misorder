@@ -14,14 +14,31 @@
 //! check the configuration that was *asked for* rather than the one the server
 //! actually has.
 
+//! # Adapters are optional, and a missing one is not a silent one
+//!
+//! The client libraries are behind their protocol's feature, so an embedder
+//! that needs one adapter does not link the rest. What is *not* behind a
+//! feature is the scenario vocabulary: a scenario declaring a stream parses in
+//! every build. So a build with the adapter left out has to answer a scenario
+//! that wants one, and it answers with [`Error::Unsupported`] naming the
+//! feature. Skipping the topology instead would let a scenario come all the
+//! way up and publish at a stream nothing had created, which is the exact
+//! failure `apply_topology` was extended to close.
+
+#[cfg(feature = "nats")]
 use async_nats::jetstream;
+#[cfg(feature = "nats")]
 use async_nats::jetstream::consumer::pull;
+#[cfg(feature = "nats")]
 use async_nats::jetstream::stream::DiscardPolicy;
 
 use crate::error::{Error, Result};
+#[cfg(feature = "nats")]
 use crate::event::NatsEvent;
 use crate::proxy::EventSink;
-use crate::scenario::file::{Discard, Postgres, Stream};
+#[cfg(feature = "nats")]
+use crate::scenario::file::Discard;
+use crate::scenario::file::{Postgres, Stream};
 
 /// The consumer name a stream gets when the scenario does not choose one.
 pub fn default_consumer_name(stream: &str) -> String {
@@ -45,6 +62,7 @@ pub fn default_filter_subject(stream: &Stream) -> Option<&str> {
 /// the difference between `max_deliver_respected` checking what the server does
 /// against what the server was told, and it checking the scenario against
 /// itself.
+#[cfg(feature = "nats")]
 pub async fn apply_stream(
     address: &str,
     stream: &Stream,
@@ -142,10 +160,30 @@ pub async fn apply_stream(
 
 /// Connects and returns a JetStream context.
 ///
+/// The answer a build without the `nats` feature gives a scenario that declares
+/// a stream.
+///
+/// Named and shaped exactly like the real one, so the caller has no branch: the
+/// decision is made once, here, by whether the adapter was compiled in.
+#[cfg(not(feature = "nats"))]
+pub async fn apply_stream(
+    _address: &str,
+    stream: &Stream,
+    _events: &EventSink,
+    _at: std::time::Duration,
+) -> Result<()> {
+    Err(Error::Unsupported(format!(
+        "the scenario declares the stream `{}`, and this build of misorder has no nats \
+         adapter in it. Rebuild with the `nats` feature.",
+        stream.name
+    )))
+}
+
 /// Straight to the dependency, never through a proxy. Topology is applied
 /// before the service starts, so there is nothing for a fault to perturb and a
 /// dropped connection here would be the harness failing rather than a run
 /// finding something.
+#[cfg(feature = "nats")]
 pub async fn connect(address: &str) -> Result<jetstream::Context> {
     let client = async_nats::connect(address).await.map_err(|error| {
         Error::Environment(format!(
@@ -156,6 +194,7 @@ pub async fn connect(address: &str) -> Result<jetstream::Context> {
     Ok(jetstream::new(client))
 }
 
+#[cfg(feature = "nats")]
 async fn jetstream_update(
     context: &jetstream::Context,
     config: &jetstream::stream::Config,
@@ -226,6 +265,7 @@ mod tests {
     /// scenario's own numbers here instead would hand `max_deliver_respected` a
     /// limit nothing is enforcing, and it would then pass every run against a
     /// stream that does not exist.
+    #[cfg(feature = "nats")]
     #[tokio::test]
     async fn a_stream_that_cannot_be_reached_reports_nothing() {
         let (events, mut receiver) = EventSink::new();

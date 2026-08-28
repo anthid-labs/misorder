@@ -31,12 +31,16 @@ pub struct Driver<'a> {
     ingress: Option<SocketAddr>,
     /// Whether the scenario declares any JetStream stream.
     ///
+    /// Only read by the `nats` build of [`Self::publish`], and kept in every
+    /// build so [`Self::with_streams`] stays one function rather than two.
+    ///
     /// Decides how a `publish` step is sent, and the difference is worth the
     /// field. A JetStream publish waits for the server's `PubAck`, so a subject
     /// no stream covers is reported as the scenario error it is. A core publish
     /// has no such answer: it would succeed against a server that stored
     /// nothing, and the run would check its invariants against a system that
     /// was never given any work.
+    #[cfg_attr(not(feature = "nats"), allow(dead_code))]
     streams: bool,
 }
 
@@ -187,6 +191,7 @@ impl<'a> Driver<'a> {
 
     /// Sends one message and, where a stream should hold it, waits to be told
     /// it was stored.
+    #[cfg(feature = "nats")]
     async fn publish(&self, address: &str, subject: &str, payload: Vec<u8>) -> Result<()> {
         let client = async_nats::connect(address).await.map_err(|error| {
             Error::Environment(format!(
@@ -237,6 +242,22 @@ impl<'a> Driver<'a> {
         })?;
 
         Ok(())
+    }
+
+    /// The answer a build without the `nats` feature gives a publish step.
+    ///
+    /// A scenario declaring `publish` parses in every build - the vocabulary is
+    /// not behind a feature - so this is the one place that can tell the
+    /// operator the adapter is missing rather than the scenario wrong. Which is
+    /// why it is an error and not a skip: a workload that published nothing
+    /// would leave every invariant checking a system that was given no work,
+    /// and the run would pass.
+    #[cfg(not(feature = "nats"))]
+    async fn publish(&self, _address: &str, subject: &str, _payload: Vec<u8>) -> Result<()> {
+        Err(Error::Unsupported(format!(
+            "a workload step publishes to {subject}, and this build of misorder has no nats \
+             adapter in it. Rebuild with the `nats` feature."
+        )))
     }
 
     async fn step(&self, step: &Step) -> Result<()> {

@@ -1,3 +1,9 @@
+// Only in a build with the adapter, because the whole file drives it. The
+// dev-dependency on `async-nats` is unconditional, but `misorder::proxy::nats`
+// is not, and without this the crate fails to build its tests under any
+// feature set that leaves the adapter out - which is the set an embedder
+// taking one protocol uses.
+#![cfg(feature = "nats")]
 //! The NATS loop, against a real server.
 //!
 //! Skipped unless `MISORDER_TEST_NATS_URL` names one. Deliberately not

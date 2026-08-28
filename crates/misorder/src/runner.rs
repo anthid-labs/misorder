@@ -23,7 +23,12 @@ use crate::proxy::http::HttpAdapter;
 // Any adapter needs these, not just the HTTP one. Gated on the set rather than
 // unconditionally, because a build with no protocol feature binds no adapter
 // and would carry an unused import.
-#[cfg(any(feature = "http", feature = "redis"))]
+//
+// The set is every protocol `bind_ingress` and `bind_egress` can bind, and it
+// has to stay that way: leaving `nats` out of it built under the default
+// features - where `http` carries the import - and failed only for an embedder
+// who took the NATS adapter on its own.
+#[cfg(any(feature = "http", feature = "nats", feature = "redis"))]
 use crate::proxy::{Adapter, ProxyContext};
 use crate::report::Reproducer;
 use crate::report::run::{

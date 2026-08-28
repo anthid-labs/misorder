@@ -16,6 +16,15 @@ rust-version.workspace = true
 name = "misorder"
 path = "src/lib.rs"
 
+# The example drives the HTTP adapter, so it exists only in a build that has
+# one. Declared here rather than gated in the file, because `required-features`
+# is what stops cargo from *building* an example - a `#![cfg]` inside it would
+# leave `cargo build --examples` compiling an empty binary and calling it
+# passing.
+[[example]]
+name = "stripe_webhook_ordering"
+required-features = ["http"]
+
 [lints]
 workspace = true
 
