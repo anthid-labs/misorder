@@ -182,6 +182,7 @@ pub enum NatsEvent {
         max_deliver: u32,
         ack_wait: Duration,
     },
+    ConnectionClosed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

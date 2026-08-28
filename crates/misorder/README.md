@@ -39,7 +39,7 @@ whatever binary is at the top of the stack.
 
 Features, one per protocol and all on by default: `nats`, `postgres`, `http`.
 
-See the [repository](https://github.com/misorder/misorder) for the scenario
+See the [repository](https://github.com/anthid-labs/misorder) for the scenario
 format, the built-in invariant catalogue, and the roadmap.
 
 Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).

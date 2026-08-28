@@ -14,21 +14,22 @@ combinations for the weak points unknown until a production outage.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Status: the loop closes for HTTP and Redis. NATS and Postgres do not yet.**
+**Status: the loop closes for HTTP, Redis and NATS. Postgres does not yet.**
 `mis run` starts your service, puts a proxy between it and everything it talks
 to, drives the workload through that, checks the invariants and hands back a
 shrunk reproducer — with no Docker involved, in either direction:
 
 - **Ingress**, where the vendor calls you. A webhook endpoint, with the workload
   driver standing in for Stripe.
-- **Egress**, where you call the dependency. Your service reaches Redis through
-  the proxy by reading a different value out of `REDIS_URL`.
+- **Egress**, where you call the dependency. Your service reaches Redis or NATS
+  through the proxy by reading a different value out of `REDIS_URL` or
+  `NATS_URL`.
 
-What is not done: the NATS and Postgres wire codecs, and the container
-orchestration a scenario needing them would use. A dependency you started
-yourself — `docker compose up redis` — is declared with an address and needs
-neither. Everything unimplemented reports `not supported yet` rather than
-pretending. See [Roadmap](#roadmap) and [Not done](#not-done).
+What is not done: the Postgres wire codec, and the container orchestration a
+scenario needing it would use. A dependency you started yourself, with
+`docker compose up nats`, is declared with an address and needs neither.
+Everything unimplemented reports `not supported yet` rather than pretending. See
+[Roadmap](#roadmap) and [Not done](#not-done).
 
 ## The words this README uses
 
@@ -719,10 +720,20 @@ language — has a stable surface to build on.
 
 ## Not done
 
-- **The NATS and Postgres wire codecs.** The seam is defined and the fault
-  vocabulary is complete; the codecs are not written. The other two are:
-  `proxy::http` speaks HTTP/1.1 and `proxy::redis` speaks RESP, and both ask at
-  every fork.
+- **The Postgres wire codec.** The seam is defined and the fault vocabulary is
+  complete; the codec is not written. The other three are: `proxy::http` speaks
+  HTTP/1.1, `proxy::redis` speaks RESP, `proxy::nats` speaks the NATS line
+  protocol, and all three ask at every fork.
+- **JetStream `ack_wait` on demand.** `ack_timeout` holds an ack for a fixed
+  span and the server's expiry fires on its own wall clock, so the duplicate
+  processing race is explored rather than commanded. Nothing crosses the wire
+  when that timer fires, so there is no decision for a proxy to intercept: it is
+  the case Phase 3's simulated JetStream exists for.
+- **Perturbing a service's own publish.** `fork_kinds("nats")` gives the adapter
+  `Connection`, `Deliver` and `Ack`. An ordinary `PUB` on the service's own
+  subject is observed and forwarded untouched, so an outbox publish can be seen
+  in a report but not delayed or dropped. Widening that is a change to the fork
+  vocabulary rather than to the adapter.
 - **Container orchestration.** `orchestrator::docker` connects to the daemon and
   reports a clear error; it does not start anything. A scenario that declares no
   dependencies never reaches it, and one that declares an already-running
@@ -748,9 +759,6 @@ language — has a stable surface to build on.
   misorder sees it, so neither is in the way yet — but HTTP/2 is what would make
   `reorder` useful against a real HTTP client, which today needs pipelining that
   almost nobody does.
-- **Publishing a workload step.** The NATS side of the driver. Posting is
-  implemented, and posts go out pipelined on one connection followed by a
-  half-close, which is what gives a reorder two requests in flight to swap.
 - **Quiescence detection.** An idle window, which is a heuristic. Deliberately a
   conservative one: calling quiescence during a 40ms CPU burst would manufacture
   a failure that never happened. It is what gates the virtual clock.

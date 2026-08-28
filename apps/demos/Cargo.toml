@@ -19,6 +19,12 @@ path = "src/bins/redis.rs"
 name = "billing_demo"
 path = "src/bins/billing.rs"
 
+[[bin]]
+name = "nats_demo"
+path = "src/bins/nats.rs"
+
 [dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+async-nats = { workspace = true }
+futures = { workspace = true }

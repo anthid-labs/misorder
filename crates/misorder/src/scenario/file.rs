@@ -254,6 +254,12 @@ impl Deps {
     pub fn external(&self) -> Vec<(&'static str, &str)> {
         let mut found = Vec::new();
 
+        if let Some(nats) = &self.nats
+            && let Some(address) = &nats.address
+        {
+            found.push(("nats", address.as_str()));
+        }
+
         if let Some(redis) = &self.redis
             && let Some(address) = &redis.address
         {
@@ -267,6 +273,29 @@ impl Deps {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Nats {
+    /// `host:port` of a NATS that is already running.
+    ///
+    /// Required today, because starting containers is not implemented yet.
+    /// That is deliberately not a placeholder: a server somebody else brought
+    /// up, with `docker compose up nats` or as a shared instance, is how most
+    /// people already run their integration tests, and a scenario that can
+    /// point at one needs no daemon of its own.
+    ///
+    /// The service under test never sees this address. It gets the proxy's,
+    /// through `NATS_URL`, and that separation is what makes the fault
+    /// injection unavoidable rather than opt-in.
+    ///
+    /// # A sweep against one of these is not isolated
+    ///
+    /// misorder did not start it, so its streams are not reset between seeds.
+    /// Whatever seed 40 published is still there for seed 41, and a run's
+    /// outcome can then depend on a run before it, which is exactly the
+    /// property `mis fuzz` exists to rule out. A single `mis run` is
+    /// unaffected; a sweep should have a server of its own, or the scenario
+    /// should key its subjects by `MISORDER_SEED`.
+    #[serde(default)]
+    pub address: Option<String>,
+
     /// Overrides the pinned default. Pin it in the scenario when a vendor's
     /// behaviour is version-specific, which is most of the time it matters.
     #[serde(default)]

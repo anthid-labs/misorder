@@ -163,6 +163,131 @@ impl Forks {
     }
 }
 
+/// What the proxies have seen, for readiness.
+///
+/// `ready_when = "first_connection"` and `"nats_subscription_active"` are
+/// detected from traffic crossing a proxy, and a proxy is the only thing that
+/// sees it. The alternative would be polling the service's port, which says
+/// nothing: a process that is listening has not necessarily attached its
+/// durable, and publishing the workload at one that has not is a failure that
+/// is entirely the harness's fault.
+///
+/// A `watch` rather than a `Notify` because the signal usually arrives *before*
+/// anything waits for it: the service connects while the run loop is still
+/// starting it. A notification with no waiter is lost, and the run would then
+/// wait out its whole `ready_timeout` for something that already happened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Signals {
+    /// A connection was accepted by any proxy.
+    pub connected: bool,
+    /// A NATS `SUB` crossed a proxy.
+    pub subscribed: bool,
+}
+
+/// Shared between every proxy and the run loop.
+#[derive(Debug, Clone)]
+pub struct Readiness {
+    sender: std::sync::Arc<tokio::sync::watch::Sender<Signals>>,
+}
+
+impl Default for Readiness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Readiness {
+    pub fn new() -> Self {
+        let (sender, _receiver) = tokio::sync::watch::channel(Signals::default());
+
+        Self {
+            sender: std::sync::Arc::new(sender),
+        }
+    }
+
+    /// A connection reached a proxy.
+    pub fn connected(&self) {
+        self.sender.send_if_modified(|signals| {
+            let changed = !signals.connected;
+            signals.connected = true;
+            changed
+        });
+    }
+
+    /// A subscription crossed a proxy.
+    ///
+    /// Implies a connection, because one had to be accepted to carry it. Set
+    /// together so a scenario asking for the weaker signal is never left
+    /// waiting by an adapter that only reported the stronger one.
+    pub fn subscribed(&self) {
+        self.sender.send_if_modified(|signals| {
+            let changed = !signals.subscribed || !signals.connected;
+            signals.subscribed = true;
+            signals.connected = true;
+            changed
+        });
+    }
+
+    pub fn signals(&self) -> Signals {
+        *self.sender.borrow()
+    }
+
+    /// Waits for the signal a readiness mode is defined by.
+    ///
+    /// An expiry is [`Error::Environment`] rather than a finding: a service
+    /// that never came up is the run's own fault, and reporting it as an
+    /// invariant violation would be an invented failure. Those cost more trust
+    /// than several missed real ones.
+    pub async fn wait(
+        &self,
+        ready: crate::scenario::file::Ready,
+        timeout: std::time::Duration,
+    ) -> crate::error::Result<()> {
+        use crate::scenario::file::Ready;
+
+        let mut receiver = self.sender.subscribe();
+
+        let waiting = async {
+            let matched = match ready {
+                Ready::FirstConnection => receiver.wait_for(|signals| signals.connected).await,
+                Ready::NatsSubscriptionActive => {
+                    receiver.wait_for(|signals| signals.subscribed).await
+                }
+                // No adapter reports it, because the Postgres codec is not
+                // written. Named rather than left to time out, so the reader is
+                // sent to the gap instead of to their own service.
+                Ready::PostgresConnected => {
+                    return Err(crate::error::Error::Unsupported(
+                        "`ready_when = \"postgres_connected\"` needs the Postgres adapter, and \
+                         its wire codec is not written yet"
+                            .to_string(),
+                    ));
+                }
+                other => {
+                    return Err(crate::error::Error::Internal(format!(
+                        "`{other}` is not detected from proxy traffic and should not have \
+                         reached here"
+                    )));
+                }
+            };
+
+            matched.map(|_| ()).map_err(|_| {
+                crate::error::Error::Internal(
+                    "every proxy stopped before the service was ready".to_string(),
+                )
+            })
+        };
+
+        match tokio::time::timeout(timeout, waiting).await {
+            Ok(result) => result,
+            Err(_) => Err(crate::error::Error::Environment(format!(
+                "the service was not ready within {timeout:?}: nothing matching \
+                 `ready_when = \"{ready}\"` crossed a proxy"
+            ))),
+        }
+    }
+}
+
 /// Everything an adapter needs, and deliberately nothing else.
 ///
 /// No clock, no RNG, no direct access to the trace. An adapter that wants to
@@ -175,6 +300,9 @@ pub struct ProxyContext {
     pub upstream: String,
     pub events: EventSink,
     pub cancel: CancellationToken,
+    /// Where readiness is reported. Default is a handle nobody waits on, so an
+    /// adapter under test needs no extra wiring.
+    readiness: Readiness,
 }
 
 impl ProxyContext {
@@ -191,7 +319,19 @@ impl ProxyContext {
             upstream: upstream.into(),
             events,
             cancel,
+            readiness: Readiness::new(),
         }
+    }
+
+    /// Reports readiness into the run loop's handle rather than a private one.
+    pub fn with_readiness(mut self, readiness: Readiness) -> Self {
+        self.readiness = readiness;
+        self
+    }
+
+    /// What this proxy has seen, for the run loop to wait on.
+    pub fn readiness(&self) -> &Readiness {
+        &self.readiness
     }
 
     /// The next connection, numbered in the order it was accepted.
@@ -202,6 +342,11 @@ impl ProxyContext {
     /// which is one task, and an adapter that numbered them anywhere else would
     /// have made the ordering the OS's to decide.
     pub fn next_connection(&self) -> ConnectionId {
+        // Every adapter numbers connections here, so reporting from this one
+        // place is what makes `first_connection` work for all of them without
+        // a line in each.
+        self.readiness.connected();
+
         ConnectionId(self.connections.fetch_add(1, Ordering::Relaxed) + 1)
     }
 

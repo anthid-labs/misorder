@@ -29,7 +29,7 @@ harness:
 The engine is [`misorder`](https://crates.io/crates/misorder). This crate is
 argument parsing, the log subscriber, and the exit code.
 
-See the [repository](https://github.com/misorder/misorder) for the scenario
+See the [repository](https://github.com/anthid-labs/misorder) for the scenario
 format and the roadmap.
 
 Licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0).

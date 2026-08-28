@@ -29,7 +29,7 @@ use crate::report::Reproducer;
 use crate::report::run::{
     self, Decisions, Engine, Faults, RunReport, ScenarioRef, ShardRef, SweepReport, Verdict,
 };
-use crate::scenario::file::{Resolved, Step};
+use crate::scenario::file::{Ready, Resolved, Step};
 use crate::schedule::{Profile, Scheduler};
 use crate::shrink::{self, Oracle};
 use crate::trace::Trace;
@@ -469,6 +469,12 @@ impl Runner {
 
         let environment = Environment::start(&self.scenario.deps, &self.scenario.run).await?;
 
+        // Topology first, service second. The service must never observe a
+        // half-built stream.
+        environment
+            .apply_topology(&self.scenario.deps, &events, started.elapsed())
+            .await?;
+
         // From here on the environment and the service must be torn down
         // whatever happens, so the rest is one fallible block and the teardown
         // is unconditional. A run that failed and leaked a Postgres container
@@ -565,8 +571,10 @@ impl Runner {
         // of its environment at startup. This is the "no SDK" stance in one
         // mechanism: the service reaches Redis through a different value in
         // `REDIS_URL` and is never told why.
+        let readiness = crate::proxy::Readiness::new();
+
         let mut injected = self
-            .start_egress(&mut running.proxies, scheduler, events, cancel)
+            .start_egress(&mut running.proxies, scheduler, events, cancel, &readiness)
             .await?;
 
         // Which run this is, so a service sharing a dependency with other runs
@@ -593,9 +601,21 @@ impl Runner {
                 }),
             );
 
-            service
-                .await_ready(system.ready_when, self.scenario.run.ready_timeout)
-                .await?;
+            // Split by who can see the signal. `immediate` and `http_listening`
+            // are answered from the process itself; the rest are detected from
+            // traffic crossing a proxy, and only the proxies see that.
+            match system.ready_when {
+                Ready::Immediate | Ready::HttpListening => {
+                    service
+                        .await_ready(system.ready_when, self.scenario.run.ready_timeout)
+                        .await?;
+                }
+                observed => {
+                    readiness
+                        .wait(observed, self.scenario.run.ready_timeout)
+                        .await?;
+                }
+            }
 
             running.service_address = running.service_address.or_else(|| service.address());
             running.services.push(service);
@@ -615,6 +635,13 @@ impl Runner {
 
         Driver::new(environment, events)
             .with_ingress(running.ingress)
+            .with_streams(
+                self.scenario
+                    .deps
+                    .nats
+                    .as_ref()
+                    .is_some_and(|nats| !nats.streams.is_empty()),
+            )
             .run(&self.scenario.workload, started.elapsed())
             .await?;
 
@@ -637,12 +664,15 @@ impl Runner {
         scheduler: &Scheduler,
         events: &EventSink,
         cancel: &CancellationToken,
+        readiness: &crate::proxy::Readiness,
     ) -> Result<Vec<(String, String)>> {
         let mut injected = Vec::new();
 
         for (protocol, upstream) in self.scenario.deps.external() {
-            let endpoint =
-                Self::bind_egress(protocol, upstream, proxies, scheduler, events, cancel).await?;
+            let endpoint = Self::bind_egress(
+                protocol, upstream, proxies, scheduler, events, cancel, readiness,
+            )
+            .await?;
 
             tracing::debug!(
                 protocol,
@@ -667,7 +697,7 @@ impl Runner {
     /// the imports at the top of this file are: with none of them compiled in,
     /// every parameter here is for an arm that does not exist. Add a protocol
     /// to the `any(..)` when you add its arm.
-    #[cfg_attr(not(any(feature = "redis")), allow(unused_variables))]
+    #[cfg_attr(not(any(feature = "nats", feature = "redis")), allow(unused_variables))]
     async fn bind_egress(
         protocol: &str,
         upstream: &str,
@@ -675,8 +705,26 @@ impl Runner {
         scheduler: &Scheduler,
         events: &EventSink,
         cancel: &CancellationToken,
+        readiness: &crate::proxy::Readiness,
     ) -> Result<crate::proxy::Endpoint> {
         match protocol {
+            #[cfg(feature = "nats")]
+            "nats" => {
+                let mut adapter = crate::proxy::nats::NatsAdapter::new();
+                let endpoint = adapter.bind(upstream).await?;
+
+                let context = ProxyContext::new(
+                    scheduler.clone(),
+                    upstream.to_string(),
+                    events.clone(),
+                    cancel.clone(),
+                )
+                .with_readiness(readiness.clone());
+
+                proxies.push(tokio::spawn(async move { adapter.serve(context).await }));
+
+                Ok(endpoint)
+            }
             #[cfg(feature = "redis")]
             "redis" => {
                 let mut adapter = crate::proxy::redis::RedisAdapter::new();
@@ -687,7 +735,8 @@ impl Runner {
                     upstream.to_string(),
                     events.clone(),
                     cancel.clone(),
-                );
+                )
+                .with_readiness(readiness.clone());
 
                 proxies.push(tokio::spawn(async move { adapter.serve(context).await }));
 

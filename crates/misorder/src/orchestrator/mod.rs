@@ -101,6 +101,49 @@ impl Environment {
         client.start_declared(deps, settings).await
     }
 
+    /// Puts the started dependencies into the shape the scenario asked for.
+    ///
+    /// Separate from [`Environment::start`] and called for every dependency,
+    /// however it got there. A dependency somebody else started still needs its
+    /// streams: skipping topology for those was the gap that let a scenario
+    /// come all the way up, publish its workload at a stream that did not
+    /// exist, and report the scenario as mis-declared.
+    ///
+    /// Before the service starts, always. A stream created after the service
+    /// has already subscribed produces a run whose first seconds are the
+    /// harness catching up, and the timing of that is not the scheduler's, so
+    /// it would be nondeterminism arriving through the back door.
+    pub async fn apply_topology(
+        &self,
+        deps: &Deps,
+        events: &crate::proxy::EventSink,
+        at: std::time::Duration,
+    ) -> Result<()> {
+        if let Some(nats) = &deps.nats {
+            let address = self.address_of("nats").ok_or_else(|| {
+                crate::error::Error::Internal(
+                    "a nats topology was applied against no running nats".to_string(),
+                )
+            })?;
+
+            for stream in &nats.streams {
+                topology::apply_stream(address, stream, events, at).await?;
+            }
+        }
+
+        if let Some(postgres) = &deps.postgres {
+            let address = self.address_of("postgres").ok_or_else(|| {
+                crate::error::Error::Internal(
+                    "a postgres topology was applied against no running postgres".to_string(),
+                )
+            })?;
+
+            topology::apply_migrations(address, postgres).await?;
+        }
+
+        Ok(())
+    }
+
     pub fn dependencies(&self) -> &[Dependency] {
         &self.dependencies
     }

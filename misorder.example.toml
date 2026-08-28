@@ -61,6 +61,20 @@ env = { RUST_LOG = "info" }
 # A simulated dependency has to answer "is your sim really NATS?" every time it
 # finds something. A real container never does.
 
+# `host:port` of a NATS that is already running. Required today, because
+# starting containers is not implemented yet.
+#
+# The service under test never sees this. It gets the proxy's address through
+# `NATS_URL`, and that separation is what makes the fault injection unavoidable
+# rather than opt-in.
+#
+# A sweep against one of these is not isolated: misorder did not start it, so
+# whatever seed 40 published is still there for seed 41. A single `mis run` is
+# unaffected; a sweep should have a server of its own, or the scenario should
+# key its subjects by `MISORDER_SEED`.
+[deps.nats]
+address = "127.0.0.1:4222"
+
 # A JetStream stream and the consumer semantics that go with it.
 [[deps.nats.streams]]
 name = "LEDGER"

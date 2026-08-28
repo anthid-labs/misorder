@@ -13,8 +13,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/misorder/misorder"
-homepage = "https://github.com/misorder/misorder"
+repository = "https://github.com/anthid-labs/misorder"
+homepage = "https://github.com/anthid-labs/misorder"
 authors = ["Dallin Wright <dallinwright@anthid.com>"]
 # Stated rather than inferred, so a build on an older toolchain fails with the
 # version it needs instead of an error inside a dependency. Edition 2024 puts

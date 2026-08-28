@@ -29,6 +29,15 @@ pub struct Driver<'a> {
     /// Where HTTP steps post, which is the ingress proxy rather than the
     /// service. `None` for a scenario with no `post` step.
     ingress: Option<SocketAddr>,
+    /// Whether the scenario declares any JetStream stream.
+    ///
+    /// Decides how a `publish` step is sent, and the difference is worth the
+    /// field. A JetStream publish waits for the server's `PubAck`, so a subject
+    /// no stream covers is reported as the scenario error it is. A core publish
+    /// has no such answer: it would succeed against a server that stored
+    /// nothing, and the run would check its invariants against a system that
+    /// was never given any work.
+    streams: bool,
 }
 
 impl<'a> Driver<'a> {
@@ -37,7 +46,14 @@ impl<'a> Driver<'a> {
             environment,
             events,
             ingress: None,
+            streams: false,
         }
+    }
+
+    /// Whether a stream should capture what `publish` steps send.
+    pub fn with_streams(mut self, streams: bool) -> Self {
+        self.streams = streams;
+        self
     }
 
     /// Where `post` steps go.
@@ -169,6 +185,60 @@ impl<'a> Driver<'a> {
         Ok(())
     }
 
+    /// Sends one message and, where a stream should hold it, waits to be told
+    /// it was stored.
+    async fn publish(&self, address: &str, subject: &str, payload: Vec<u8>) -> Result<()> {
+        let client = async_nats::connect(address).await.map_err(|error| {
+            Error::Environment(format!(
+                "the workload driver could not reach nats at {address}: {error}"
+            ))
+        })?;
+
+        if !self.streams {
+            client
+                .publish(subject.to_string(), payload.into())
+                .await
+                .map_err(|error| {
+                    Error::Environment(format!("publishing to {subject} failed: {error}"))
+                })?;
+
+            // Without this the message is still in a client buffer when the
+            // connection is dropped at the end of this function, and a workload
+            // that published nothing would look like one that did.
+            client.flush().await.map_err(|error| {
+                Error::Environment(format!("flushing a publish to {subject} failed: {error}"))
+            })?;
+
+            return Ok(());
+        }
+
+        // Bound rather than used as a temporary. The context owns the client,
+        // and letting it drop at the end of this statement closes the
+        // connection out from under the `PubAck` that has not arrived yet: the
+        // publish then fails with a broken pipe that reads exactly like a
+        // mis-declared subject.
+        let jetstream = async_nats::jetstream::new(client);
+
+        let acking = jetstream
+            .publish(subject.to_string(), payload.into())
+            .await
+            .map_err(|error| {
+                Error::Environment(format!("publishing to {subject} failed: {error}"))
+            })?;
+
+        // The `PubAck` is what makes a mis-declared scenario an error instead
+        // of a quiet pass. A subject no stream covers gets no responder here,
+        // and that is a sentence someone can act on.
+        acking.await.map_err(|error| {
+            Error::Scenario(format!(
+                "nats stored nothing for a workload publish to {subject}: {error}. No declared \
+                 stream has a subject matching it."
+            ))
+        })?;
+
+        Ok(())
+    }
+
     async fn step(&self, step: &Step) -> Result<()> {
         match step {
             Step::Wait(duration) => {
@@ -183,11 +253,14 @@ impl<'a> Driver<'a> {
                     ))
                 })?;
 
-                tracing::debug!(address, subject, bytes = payload.len(), "would publish");
+                tracing::debug!(address, subject, bytes = payload.len(), "publishing");
 
-                Err(Error::Unsupported(
-                    "publishing a workload step is not implemented yet".to_string(),
-                ))
+                // Straight to the dependency, never through the proxy. The
+                // driver stands in for the vendor, so its own publish is not
+                // the traffic under test: what the schedule perturbs is the
+                // delivery of this message to the service, which crosses the
+                // proxy on its way back out.
+                self.publish(address, subject, payload.clone()).await
             }
             // Handled in `run`, which groups consecutive posts onto one
             // connection. Reaching here means a single post was routed the

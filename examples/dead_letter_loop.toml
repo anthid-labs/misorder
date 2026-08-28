@@ -1,0 +1,95 @@
+# The dead letter loop, with nothing but NATS involved.
+#
+# The NATS worked example: the service consumes from a stream, and the proxy
+# stands where the server would be.
+#
+#   docker run -d --rm -p 14222:4222 nats:2.10-alpine -js
+#   cargo build --workspace
+#   mis check examples/dead_letter_loop.toml
+#   mis run   examples/dead_letter_loop.toml --seed 8837291
+#
+# ── The premise ───────────────────────────────────────────────────────────────
+#
+# A consumer takes `ledger.>`. A message it cannot handle goes to
+# `ledger.dead_letter` so a human can look at it later. Both of those are the
+# ordinary thing to write, and `ledger.>` matches `ledger.dead_letter`.
+#
+# So the dead letter comes straight back to the consumer that produced it, fails
+# again, and is dead-lettered again. `max_deliver` does not stop it: every
+# republish is a new message with a fresh delivery count, so the server's own
+# limit is never reached. Every component behaves exactly as documented and the
+# system does not stop.
+#
+# No vendor is involved. Not every ordering bug comes from someone else's
+# system, and the two lines that combine to cause this one live in different
+# files.
+#
+# ── What is deliberately not here ─────────────────────────────────────────────
+#
+# No image, no container. `[deps.nats]` names an address, so this points at a
+# server somebody else started and misorder starts nothing.
+#
+# A sweep against one of those is not isolated: the stream misorder did not
+# create is not reset between seeds, so what seed 40 published is still there
+# for seed 41. Give a sweep a server of its own.
+
+name = "dead_letter_loop"
+
+[[system]]
+run = "./target/debug/nats_demo"
+
+# The worker's first act is to attach its durable. `first_connection` would call
+# it ready on the TCP connect, and the workload publish would then land before
+# anything was reading.
+ready_when = "nats_subscription_active"
+
+[deps.nats]
+address = "127.0.0.1:14222"
+
+[[deps.nats.streams]]
+name = "LEDGER"
+subjects = ["ledger.>"]
+
+# Five deliveries before the server gives up, and it never gets there. That is
+# the point: the limit is real and enforced, and it is not what is looping.
+max_deliver = 5
+ack_wait = "5s"
+discard = "old"
+max_bytes = 1048576
+
+# The default is the first subject, and the default is also the bug. Written out
+# rather than left implied, because a reader has to be able to see `ledger.>`
+# next to `ledger.dead_letter` to notice they match.
+consumer = "LEDGER_WORKER"
+filter_subject = "ledger.>"
+
+[[workload]]
+publish = "ledger.org.org_1.account.acct_1.order"
+payload = { order_id = "ord_1", kind = "fill", qty = 100 }
+
+# Long enough to watch the loop go round several times. Not sequencing two
+# events, which is what `wait` must never be used for: there is only one event
+# here, and this is the run observing what follows it.
+[[workload]]
+wait = "8s"
+
+# Nothing here is needed to reproduce it, which is the honest thing for this
+# scenario to say. The failure is not about ordering, and a run with an empty
+# list finds it just the same.
+[faults]
+enabled = ["redelivery", "swallow_ack", "delay"]
+
+[[invariants]]
+builtin = "no_infinite_redelivery"
+window = "5m"
+# Low, because the loop is fast and a run should not have to watch it ten times
+# to be sure.
+same_payload_max = 3
+
+[[invariants]]
+builtin = "max_deliver_respected"
+
+[run]
+timeout = "45s"
+ready_timeout = "20s"
+quiesce_after = "2s"
