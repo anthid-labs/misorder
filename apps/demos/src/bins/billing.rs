@@ -15,7 +15,7 @@
 //!   order it never needs one.
 //!
 //! It does deduplicate, on the event id, which is exactly what Stripe's own
-//! documentation tells you to do — and that is the point worth making. This
+//! documentation tells you to do, and that is the point worth making. This
 //! handler was written by someone who read the docs and did what they said. The
 //! duplicate advice is a heading with a code sample; the ordering advice is one
 //! sentence with nothing to copy, and it is the one that costs money.
@@ -23,7 +23,7 @@
 //! # The check endpoints
 //!
 //! `GET /checks/<name>` answers a question about the service's own final state
-//! and returns the **bad** rows as a JSON array — empty when nothing is wrong.
+//! and returns the **bad** rows as a JSON array, empty when nothing is wrong.
 //! That is the same shape a SQL invariant uses, and for the same reason: a
 //! query that searches for the bad state needs no knowledge of how many rows a
 //! correct run produces, so it stays a test of the service rather than of the

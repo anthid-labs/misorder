@@ -37,7 +37,8 @@ that caused it.
 The crate emits `tracing` events and installs no subscriber; that belongs to
 whatever binary is at the top of the stack.
 
-Features, one per protocol and all on by default: `nats`, `postgres`, `http`.
+Features, one per protocol and all on by default: `nats`, `postgres`, `redis`,
+`http`.
 
 See the [repository](https://github.com/anthid-labs/misorder) for the scenario
 format, the built-in invariant catalogue, and the roadmap.

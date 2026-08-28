@@ -85,7 +85,16 @@ pub const REGISTRY: &[Entry] = &[
         name: "consumer_filter_excludes_dead_letter",
         dependency: "nats",
         describe: "a consumer's filter subject does not match its own dead-letter subject",
-        status: Status::Implemented,
+        // The check is written and tested. What is missing is the event it
+        // fires on: a dead letter is a JetStream advisory published on a
+        // subject of its own, not a frame crossing a proxied connection, so
+        // nothing emits `NatsEvent::DeadLettered` and this can never report.
+        //
+        // Refused rather than left `Implemented`, because the failure mode of
+        // the other choice is the one this whole tool argues against: a
+        // scenario names it, ten thousand seeds pass, and the report says the
+        // service is fine on a question nobody actually asked.
+        status: Status::Planned,
     },
     Entry {
         name: "no_commit_after_error",

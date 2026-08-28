@@ -23,7 +23,7 @@
 //!   <https://docs.stripe.com/webhooks#automatic-retries>
 //!
 //! Either way the handler sees a `customer.subscription.deleted`, marks the
-//! subscription `canceled`, and then — seconds or days later — receives an
+//! subscription `canceled`, and then, seconds or days later, receives an
 //! `invoice.payment_failed` that was generated *before* the cancellation. It
 //! applies it, because nothing told it not to, and the subscription is
 //! `past_due` again. The customer is now being dunned for a subscription they
@@ -49,13 +49,13 @@
 //!
 //! **Days are compressed into milliseconds.** What is explored here is the
 //! *ordering* a late delivery produces, because that is the part the handler
-//! gets wrong — not the wall-clock gap, which a run bounded by seconds cannot
+//! gets wrong, not the wall-clock gap, which a run bounded by seconds cannot
 //! express and which needs the virtual clock that is not built yet.
 //!
 //! That is also why `Redelivery` is permitted here but never turns out to be
 //! required: dropping a delivery in a bounded run loses the event, where in
 //! production Stripe would bring it back tomorrow. The fault that reproduces
-//! the bug is `Reorder`, and it is the honest one — from the handler's side, an
+//! the bug is `Reorder`, and it is the honest one: from the handler's side, an
 //! event that arrives after the cancellation is the same event whether it was
 //! reordered in flight or retried for three days. The corpus entry
 //! `failed_delivery_retried_for_days` in `examples/corpus/stripe.toml` is the
@@ -124,7 +124,7 @@ impl Delivery {
 ///
 /// Generation order is the one thing that is certain and the one thing the
 /// handler never gets to see. What arrives, and in what order, is the
-/// schedule's to decide — which is the whole point: writing them out of order
+/// schedule's to decide, which is the whole point. Writing them out of order
 /// by hand tests one ordering, and the ordering that breaks you is not the one
 /// you thought of.
 fn subscription_lifecycle() -> Vec<Delivery> {
@@ -285,7 +285,7 @@ fn terminal_state_is_final(billing: &Billing) -> Result<(), String> {
 //
 // Stripe delivers at least once, so the same `invoice.payment_succeeded` can
 // arrive twice, and this handler settles on the object id rather than the event
-// id — so it would settle the same invoice twice. That is a real bug and it is
+// id, so it would settle the same invoice twice. That is a real bug and it is
 // *not an ordering bug*: two deliveries of one event break this handler in
 // generation order, with no faults enabled, which means a fuzzer is not what
 // finds it and an invariant here would fire on the baseline.
@@ -460,7 +460,7 @@ async fn run(scheduler: Scheduler) -> Billing {
 /// The faults Stripe's own documentation describes, in misorder's vocabulary.
 ///
 /// `reorder` and `delay` are "events arrive out of generation order". `drop` is
-/// the delivery that went unanswered — the one Stripe will retry for days, and
+/// the delivery that went unanswered, the one Stripe will retry for days, and
 /// the reason a late arrival exists at all.
 fn faults() -> Vec<FaultKind> {
     vec![FaultKind::Reorder, FaultKind::Delay, FaultKind::Redelivery]

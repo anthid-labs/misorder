@@ -7,7 +7,7 @@
 //! # This is also where invariants get their configuration
 //!
 //! Applying a stream emits
-//! [`NatsEvent::ConsumerConfigured`](crate::event::NatsEvent::ConsumerConfigured),
+//! [`NatsEvent::ConsumerConfigured`],
 //! which is how `max_deliver_respected` learns what the limit is and how
 //! `consumer_filter_excludes_dead_letter` learns what the filter is. The
 //! alternative, letting invariants read the scenario directly, would make them

@@ -90,7 +90,7 @@ impl Invariant for EveryCommandGetsAReply {
 /// lock never expires early, and the whole reason it has a TTL is that it can:
 ///
 /// 1. client A takes the lock with token `a1`,
-/// 2. A is slow — GC pause, a delayed reply, a long query — and the TTL expires,
+/// 2. A is slow (a GC pause, a delayed reply, a long query) and the TTL expires,
 /// 3. client B takes the same lock with token `b7`,
 /// 4. A finishes and sends `DEL key`, releasing **B's** lock,
 /// 5. C takes it while B still believes it holds it, and now two workers are in
@@ -108,7 +108,7 @@ impl Invariant for EveryCommandGetsAReply {
 ///
 /// # What it does not claim
 ///
-/// A release that goes through `EVAL` is opaque — the compare-and-delete
+/// A release that goes through `EVAL` is opaque: the compare-and-delete
 /// happens inside Lua, which is exactly the correct implementation, so there is
 /// nothing to flag and this stays quiet. That is the right asymmetry: the
 /// invariant catches the naive release and says nothing about the careful one.
@@ -129,7 +129,7 @@ pub struct LockReleasedByOwner {
     held: HashMap<(ConnectionId, Bytes), Bytes>,
     /// Commands awaiting a reply, oldest first, per connection.
     ///
-    /// Needed because `SET ... NX` only acquires when it answers `+OK` — a
+    /// Needed because `SET ... NX` only acquires when it answers `+OK`, so a
     /// `$-1` null means somebody else holds it, and treating that as an
     /// acquisition would make every contended lock look like a violation.
     pending: HashMap<ConnectionId, VecDeque<Pending>>,

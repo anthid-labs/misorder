@@ -234,7 +234,7 @@ impl Readiness {
 
     /// Waits for the signal a readiness mode is defined by.
     ///
-    /// An expiry is [`Error::Environment`] rather than a finding: a service
+    /// An expiry is [`crate::error::Error::Environment`] rather than a finding: a service
     /// that never came up is the run's own fault, and reporting it as an
     /// invariant violation would be an invented failure. Those cost more trust
     /// than several missed real ones.

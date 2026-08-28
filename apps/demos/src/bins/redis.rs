@@ -12,7 +12,7 @@
 //! The whole reason it has a TTL is that it can:
 //!
 //! 1. worker A takes the lock,
-//! 2. A's work runs long — a GC pause, a slow dependency, a delayed reply —
+//! 2. A's work runs long (a GC pause, a slow dependency, a delayed reply)
 //!    and the TTL expires,
 //! 3. worker B finds the lock free and takes it,
 //! 4. A finishes and sends `DEL`, releasing **B's** lock,
@@ -25,7 +25,7 @@
 //!
 //! Unperturbed, A finishes its work well inside the TTL, B never gets the
 //! lock, and the run is clean. The bug needs A's work to outlast the lock,
-//! which is what a delayed reply through the proxy does — so this is not a
+//! which is what a delayed reply through the proxy does, so this is not a
 //! service that is simply broken, it is one that is correct until the ordering
 //! stops being the one it was written against.
 //!
@@ -46,8 +46,8 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 /// seconds. The shape of the bug is identical either way.
 ///
 /// The value is bounded on both sides and both bounds are real. Below about
-/// 130ms the unperturbed run already loses the lock — process start, two
-/// connections through the proxy and four round trips are not free — and a
+/// 130ms the unperturbed run already loses the lock (process start, two
+/// connections through the proxy and four round trips are not free) and a
 /// scenario whose baseline fails is testing nothing. Above 250ms no single
 /// injected delay can outlast it, because that is the profile's ceiling, and
 /// the bug would need two delays to stack.
@@ -120,7 +120,7 @@ impl Redis {
 /// Namespaced by `MISORDER_SEED`, which misorder sets on every run. Without it,
 /// `mis fuzz --parallel 8` is eight of these fighting over one key on one Redis,
 /// and the failures it reports are about the collision rather than about the
-/// ordering — which is the most expensive kind of wrong answer a testing tool
+/// ordering, which is the most expensive kind of wrong answer a testing tool
 /// can give.
 ///
 /// A real service does this by pointing at its own database or by prefixing its

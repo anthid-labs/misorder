@@ -147,7 +147,7 @@ machine, writes its documents, and exits owning nothing. That is the whole shape
 of this repository and it is a design constraint rather than a stage.
 
 So the test for a new feature is: **does it need state that outlives one run, a
-second machine, or a network?** If it does, it does not belong here — not behind
+second machine, or a network?** If it does, it does not belong here, not behind
 a feature flag, not as a stub. What belongs here is the *document* that carries
 the information across the boundary, so that anything built around this repo has
 something stable to read.
@@ -167,7 +167,7 @@ is slow, and everyone concludes the tool is slow.
 ### The stable surfaces
 
 Anything built around this engine couples to it through **file formats and
-process boundaries, never a Rust API** — it reads documents this engine writes,
+process boundaries, never a Rust API**: it reads documents this engine writes,
 writes documents it reads, and runs `mis` as a child process. That keeps the
 seam open to a consumer written in Python, Go or TypeScript: parsing JSON is not
 a language commitment, and linking a Rust crate is.

@@ -176,7 +176,7 @@ pub enum Ready {
     /// The service is accepting connections on the port misorder gave it.
     ///
     /// The ingress counterpart of the three above, which are all detected from
-    /// traffic crossing a proxy — and an ingress service makes no outbound
+    /// traffic crossing a proxy, and an ingress service makes no outbound
     /// traffic before its first request arrives. Needs `listen_env` on the
     /// system, because it is that port being polled.
     HttpListening,
@@ -402,7 +402,7 @@ pub struct Redis {
     ///
     /// misorder did not start it, so it is not reset between seeds. Whatever
     /// seed 40 wrote is still there for seed 41, and a run's outcome can then
-    /// depend on a run before it — which is exactly the property `mis fuzz`
+    /// depend on a run before it, which is exactly the property `mis fuzz`
     /// exists to rule out. A single `mis run` is unaffected; a sweep should
     /// have an instance of its own, or the scenario should key everything it
     /// touches by seed. `mis fuzz` warns when it sees one of these.

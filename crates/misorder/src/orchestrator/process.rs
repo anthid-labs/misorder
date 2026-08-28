@@ -3,7 +3,7 @@
 //! The service is an ordinary process. misorder spawns it, hands it a port to
 //! listen on through its environment, waits for it to come up, and kills it
 //! when the run ends. It links nothing, imports nothing, and is not told that
-//! any of this is happening — which is the whole language stance in one
+//! any of this is happening, which is the whole language stance in one
 //! module: a Go service and a Rust service are started identically.
 //!
 //! # Why the port comes from here
@@ -15,7 +15,7 @@
 //! chooses a free one per run and sets it in the service's environment.
 //!
 //! The variable name is the scenario's to pick, because there is no convention
-//! worth guessing at — `PORT` for most things, `HTTP_PORT`, `LISTEN_ADDR` for
+//! worth guessing at: `PORT` for most things, `HTTP_PORT`, `LISTEN_ADDR` for
 //! others.
 //!
 //! # What else is injected
@@ -141,7 +141,7 @@ impl Service {
     /// Starting the workload before the service is listening produces a failure
     /// that is entirely the harness's fault, and one invented failure costs more
     /// trust than several missed real ones. That is why an unready service is a
-    /// [`Error::Environment`] — exit code 1, not a finding.
+    /// [`Error::Environment`], exit code 1, not a finding.
     pub async fn await_ready(&mut self, ready: Ready, timeout: Duration) -> Result<()> {
         match ready {
             Ready::Immediate => Ok(()),
@@ -213,8 +213,8 @@ impl Service {
 ///
 /// Bound and immediately released, so there is a window in which something else
 /// could take it. That race is unavoidable without handing the socket to the
-/// child, which is not portable, and the alternative — a fixed port in the
-/// scenario — fails every time rather than rarely.
+/// child, which is not portable, and the alternative, a fixed port in the
+/// scenario, fails every time rather than rarely.
 fn free_port() -> Result<SocketAddr> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| {
         Error::Environment(format!(
@@ -246,7 +246,7 @@ mod tests {
     ///
     /// Deliberately not "and it can be bound again". The port is released
     /// before it is returned, so between that and any later bind, anything on
-    /// the machine may take it — including another test in this suite, which is
+    /// the machine may take it, including another test in this suite, which is
     /// how the stricter version of this assertion failed. That race is
     /// documented on the function rather than tested for, because a test that
     /// asserts a race does not happen is a test that fails on a busy machine

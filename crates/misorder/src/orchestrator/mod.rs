@@ -69,7 +69,7 @@ impl Environment {
         );
 
         // No declared dependency, no daemon. A scenario whose service owns its
-        // own storage — every HTTP ingress scenario, among others — should not
+        // own storage (every HTTP ingress scenario, among others) should not
         // need Docker installed to run, and requiring it would make the first
         // five minutes of the tool a Docker troubleshooting session for people
         // whose scenario never needed a container.

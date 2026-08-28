@@ -4,8 +4,8 @@ The stable formats this engine reads and writes.
 
 misorder is a stateless, single-machine tool: it takes a scenario and a seed,
 does its work, writes its documents, and exits owning nothing. Anything you want
-to build around it — a dashboard, a CI integration, a triage bot, a shared
-reproducer library — sits on the documents described here.
+to build around it (a dashboard, a CI integration, a triage bot, a shared
+reproducer library) sits on the documents described here.
 
 This document exists so the engine can be refactored freely without breaking
 what you built, and so what you build can be written in whatever language suits
@@ -64,7 +64,7 @@ the binary.
 ### Scenario, in
 
 `misorder.example.toml` documents every key. These are generated as well as
-hand-written — turning a recorded session into a scenario produces one — so
+hand-written, because turning a recorded session into a scenario produces one, so
 treat the format as something a generator emits: no positional meaning, no
 shorthand that only reads well by hand, every optional key genuinely optional.
 
@@ -182,7 +182,7 @@ Fan-out for large sweeps.
   and a report that states which slice it ran. Modulo rather than contiguous
   ranges, so no worker draws an all-quiet block while another runs for an hour.
 - **The engine does not provide:** the fan-out, the merge, or the queue. It does
-  not need to — sharding from two integers means a shell script and a machine
+  not need to: sharding from two integers means a shell script and a machine
   list already work.
 
 ## Nothing here meters anything
@@ -216,5 +216,5 @@ Three of those are worth naming as specifically load-bearing:
 ## Before adding anything to this repository
 
 Ask whether it needs state that outlives one run, a second machine, or a
-network. If it does, it does not belong here — and what does belong here is the
+network. If it does, it does not belong here, and what does belong here is the
 document that carries the information across.

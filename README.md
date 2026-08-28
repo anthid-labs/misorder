@@ -17,7 +17,7 @@ combinations for the weak points unknown until a production outage.
 **Status: the loop closes for HTTP, Redis and NATS. Postgres does not yet.**
 `mis run` starts your service, puts a proxy between it and everything it talks
 to, drives the workload through that, checks the invariants and hands back a
-shrunk reproducer — with no Docker involved, in either direction:
+shrunk reproducer, with no Docker involved, in either direction:
 
 - **Ingress**, where the vendor calls you. A webhook endpoint, with the workload
   driver standing in for Stripe.
@@ -44,12 +44,12 @@ this whole tool is about.
 
 **Scenario.** The one TOML file you write. It declares what to run, what it
 depends on, what to drive at it, which faults are permitted, and what must
-always be true. There is no SDK and nothing to import — your service connects to
+always be true. There is no SDK and nothing to import: your service connects to
 an address misorder gives it and behaves normally. See
 [The interface is a TOML file](#the-interface-is-a-toml-file).
 
-**Adapter.** The piece that speaks one wire protocol — `http`, `nats`,
-`postgres` — in both directions, so the service and its dependency both think
+**Adapter.** The piece that speaks one wire protocol (`http`, `nats`,
+`postgres`) in both directions, so the service and its dependency both think
 they are talking to the real thing. Adding one is the intended way to
 contribute, and the surface is deliberately small: bind, accept, speak the
 protocol, ask before branching. Every adapter is open, because the long tail of
@@ -57,7 +57,7 @@ vendors is only ever covered by the person who needed one.
 
 **Fork.** Any point in a run where things could go two ways: a connection is
 accepted or refused, a response goes now or in 40ms, an ack is delivered or
-swallowed. The proxy never decides a fork itself — it asks the scheduler.
+swallowed. The proxy never decides a fork itself: it asks the scheduler.
 
 **Ordinal.** The number that names a fork, counted per connection and per kind
 of fork. The third response fork on connection 2 is ordinal 2 of
@@ -71,7 +71,7 @@ scenario file plus 10,000 seeds is 10,000 scenarios with no generator to write.
 Seeds are not ordered or related: 8837291 and 8837292 produce completely
 unrelated schedules, which is why you can never "shrink the seed".
 
-**Deterministic.** Same seed, same run — on any machine, on any number of cores,
+**Deterministic.** Same seed, same run, on any machine, on any number of cores,
 in any thread order. This is stronger than it sounds and it is not free.
 
 The obvious implementation is one PRNG advanced once per decision, and it is
@@ -88,7 +88,7 @@ across releases, so a dependency bump would silently renumber every seed and
 invalidate every committed reproducer in every user's repository. See
 [Determinism, and what it actually costs](#determinism-and-what-it-actually-costs).
 
-**Decision.** The answer at a fork — deliver now, delay 40ms, drop, close the
+**Decision.** The answer at a fork: deliver now, delay 40ms, drop, close the
 connection, reorder, corrupt a byte. Every decision has a **neutral choice**
 (deliver immediately, change nothing), and that is a design requirement rather
 than a convenience: it is what lets shrinking say "this fault was available and
@@ -96,7 +96,7 @@ was not needed" instead of deleting the line.
 
 **Trace.** The complete list of every decision a run made, as JSON Lines: a
 header, then one line per decision, each naming its fork and the answer it got.
-It is what turns a failure from an anecdote into an artifact — a trace is a
+It is what turns a failure from an anecdote into an artifact. A trace is a
 full, replayable description of one run, small enough to commit to your
 repository and read in a diff.
 
@@ -109,16 +109,16 @@ rather than assumed.
 
 **Replay.** Re-running a trace instead of a seed. The same decisions at the same
 forks, in seconds, on every pull request. A committed reproducer either
-reproduces or it does not — it is not a flaky test.
+reproduces or it does not. It is not a flaky test.
 
 **Reproducer.** A shrunk trace, committed. This is the unit of work the tool
 exists to produce: the artifact you attach to a ticket, hand to a colleague, or
-run in CI on every pull request. It is not a flaky test — it is an exact
+run in CI on every pull request. It is not a flaky test: it is an exact
 schedule that either reproduces or does not.
 
 **Shrinking.** Taking a failure of 847 decisions down to the six that actually
 caused it. It works by replacing decisions with their neutral choice, re-running,
-and keeping the replacement if the run still fails — using delta debugging
+and keeping the replacement if the run still fails, using delta debugging
 (ddmin) rather than a single greedy pass, because a greedy pass gets stuck
 whenever two decisions are only redundant together. The result is *1-minimal*:
 removing any single remaining decision makes the failure go away. Not the
@@ -137,15 +137,15 @@ that explored ten thousand orderings has nothing to report.
 They come in two kinds and you need both.
 
 *Built-in* invariants ship with each adapter and take zero input from you,
-because they encode the semantics of the dependency itself —
+because they encode the semantics of the dependency itself:
 `no_delivery_after_ack`, `max_deliver_respected`, `no_commit_after_error`. This
 is what gets a first-time user a caught bug before they have learned what the
 tool is.
 
 *Yours* are the domain assertions no protocol invariant could know, because
 nothing about NATS understands that fills never exceed order quantity. The shape
-to reach for is a query that searches for the bad state and expects nothing back
-— `expect = "empty"` — because it then needs no knowledge of how many rows a
+to reach for is a query that searches for the bad state and expects nothing back,
+using `expect = "empty"`, because it then needs no knowledge of how many rows a
 correct run produces, and stays a test of your service rather than of your
 scenario. Write five, get ten thousand orderings.
 
@@ -157,19 +157,19 @@ your scenario is real before spending an hour of compute on it. See
 
 **Corpus.** A directory of `<vendor>.toml` files recording what a vendor was
 actually observed doing, pointed at with `--corpus <directory>` or
-`MISORDER_CORPUS`. Each entry is a named **behaviour flag** — written as a
+`MISORDER_CORPUS`. Each entry is a named **behaviour flag**, written as a
 sentence about the vendor, `no_ack_on_second_replace` rather than `ls_bug_14`,
 because the name appears in scenarios, reports and drift alerts.
 
 What makes it a corpus rather than a wiki is that every behaviour carries its
 **provenance**, and the three kinds are ranked honestly:
 
-- `recorded` — observed on the wire, carrying the digest of the transcript it
+- `recorded`: observed on the wire, carrying the digest of the transcript it
   came from, so a consumer can verify the entry rather than trust it. The
   strongest claim, and the only one that cannot be got by reading.
-- `documented` — the vendor said so, in a changelog or a support ticket. Weaker
+- `documented`: the vendor said so, in a changelog or a support ticket. Weaker
   than a recording, and worth having because it dates the change.
-- `reported` — someone else hit it, in a GitHub issue or a forum thread. The
+- `reported`: someone else hit it, in a GitHub issue or a forum thread. The
   weakest claim, and often the first sign of a real one.
 
 The format is versioned (`corpus::FORMAT_VERSION`) because an entry contributed
@@ -192,7 +192,7 @@ fails at the part that decides whether anyone acts on them.
 misorder keeps the fault injection and fixes all three. Every run is addressed by
 one integer, every decision is recorded, the failure shrinks to its minimal
 cause automatically, and what you commit replays exactly. The point is not that
-it breaks your service in more interesting ways — it is that when it does, you
+it breaks your service in more interesting ways. It is that when it does, you
 get something you can hand to someone.
 
 ## Who this is for
@@ -237,7 +237,7 @@ expect = "empty"
 
 That is the only artifact you write, and it runs as written.
 [`misorder.example.toml`](misorder.example.toml) documents every key, including
-the NATS and Postgres blocks whose adapters are still being built.
+the Postgres block whose adapter is still being built.
 
 ## Install
 
@@ -300,7 +300,7 @@ which is exactly what Stripe's documentation tells you to do. The duplicate
 advice is a heading with a code sample; the ordering advice is one sentence with
 nothing to copy, and it is the one that costs money.
 
-Twelve seeds found it and they are **one** failure, not twelve — grouped by the
+Twelve seeds found it and they are **one** failure, not twelve, grouped by the
 signature of the shape, which is what stops a sweep reading as a wall of red.
 
 The pieces: [`examples/stripe_invoice_lifecycle.toml`](examples/stripe_invoice_lifecycle.toml)
@@ -323,7 +323,7 @@ reproduces or does not.
 
 ### The other direction
 
-That one is **ingress** — the vendor calls you. The egress example is a worker
+That one is **ingress**: the vendor calls you. The egress example is a worker
 taking a Redis lock the way everybody writes it first, and it needs a Redis you
 already have:
 
@@ -355,8 +355,54 @@ The worker reads `REDIS_URL` and is never told it is not talking to Redis.
 [`examples/redis_naive_lock.toml`](examples/redis_naive_lock.toml) is the
 scenario.
 
+### The one with a broker
+
+A JetStream consumer filtered on `ledger.>` that dead-letters what it cannot
+handle to `ledger.dead_letter`. Both lines are the ordinary thing to write, and
+`ledger.>` matches `ledger.dead_letter`, so the dead letter comes straight back
+to the consumer that produced it. It needs a NATS with JetStream on:
+
+```bash
+docker run -d --rm -p 14222:4222 nats:2.10-alpine -js
+mis run examples/dead_letter_loop.toml --seed 8837291
+```
+
+```text
+MINIMAL REPRODUCER: dead_letter_loop
+seed 8837291, 4 of 4 decisions
+
+  1. [   212ms] conn:1 delay delivery by 64ms
+  2. [   277ms] conn:1 delay ack by 36ms ($JS.ACK.LEDGER.LEDGER_WORKER.1.6.7...)
+  3. [   355ms] conn:1 drop delivery (ledger.dead_letter)
+  4. [  7566ms] conn:1 drop delivery
+
+  no_infinite_redelivery: the payload on ledger.dead_letter was delivered 4 times
+  within 300s, over the limit of 3
+
+  Fault 'redelivery' was not required.
+```
+
+`max_deliver` does not stop this, which is the part worth sitting with: every
+republish is a new message with a fresh delivery count, so the server's own
+limit is never reached. Every component behaves exactly as documented and the
+system does not stop.
+
+Note what the last line says, and what the scenario's fault list does not
+change. This failure is not about ordering, and a run permitting no faults at
+all finds it just the same. That is the honest baseline a scenario should be
+able to report, rather than a tool that only ever blames the schedule.
+
+No vendor is involved either. Not every ordering bug comes from someone else's
+system, and the two lines that combine to cause this one live in different
+files.
+
+The worker reads `NATS_URL` and is never told it is not talking to NATS.
+[`apps/demos`](apps/demos) builds the service (`nats_demo`);
+[`examples/dead_letter_loop.toml`](examples/dead_letter_loop.toml) is the
+scenario.
+
 There is also a version of the Stripe story with no scenario file at all,
-driving the engine as a library —
+driving the engine as a library:
 [`crates/misorder/examples/stripe_webhook_ordering.rs`](crates/misorder/examples/stripe_webhook_ordering.rs),
 runnable with `cargo run -p misorder --example stripe_webhook_ordering`.
 
@@ -386,7 +432,7 @@ mis fuzz scenario.toml --seeds 100000 --shard 7/64 --report shard-7.json
 ```
 
 A sweep draws a progress bar while it runs, and a second one while it shrinks
-what it found — ten thousand seeds is minutes, and a tool that prints nothing
+what it found. Ten thousand seeds is minutes, and a tool that prints nothing
 for minutes is one people interrupt to check it is alive. It draws only when a
 terminal is attached, so a redirected sweep writes nothing extra.
 
@@ -420,7 +466,7 @@ Nothing, beyond its ordinary configuration:
 The last one is worth a sentence, because ignoring it is a trap. Sixteen seeds
 in parallel against one Redis is sixteen services writing the same keys, and the
 failures a sweep then reports are about the collision rather than about the
-ordering — the most expensive kind of wrong answer a testing tool can give. A
+ordering, the most expensive kind of wrong answer a testing tool can give. A
 service that prefixes what it touches with the seed is isolated again; one that
 ignores it is exactly as isolated as it was. That is the right shape for a
 harness: offer the one fact only it has, and stay out of the decision.
@@ -524,7 +570,7 @@ first-time user gets a caught bug before learning what this tool is.
 | `max_deliver_respected`                  | nats       | works   |
 | `no_delivery_after_ack`                  | nats       | works   |
 | `no_infinite_redelivery`                 | nats       | works   |
-| `consumer_filter_excludes_dead_letter`   | nats       | works   |
+| `consumer_filter_excludes_dead_letter`   | nats       | planned |
 | `no_commit_after_error`                  | postgres   | works   |
 | `no_query_outside_transaction`           | postgres   | planned |
 | `set_local_role_survives_pooler`         | postgres   | planned |
@@ -590,7 +636,7 @@ schedule that runs in under a second and either reproduces or does not.
 | ----------------------- | ------------------------------------------------------------- |
 | `crates/misorder`       | The library: scenario, orchestrator, proxy, schedule, trace, invariants, shrinker. |
 | `apps/misorder-cli`     | The `mis` binary: argument parsing, logging setup, exit codes. |
-| `apps/demos`            | The services under test: `billing_demo` for the ingress example, `redis_demo` for the egress one. Both wrong on purpose. |
+| `apps/demos`            | The services under test: `billing_demo` for the ingress example, `redis_demo` and `nats_demo` for the egress ones. All wrong on purpose. |
 | `examples/`             | Scenario files, including the one in this README, and a corpus. |
 | `docker/`               | Dockerfile and a compose example.                              |
 | `docs/ARCHITECTURE.md`  | How the components fit, with a flowchart for each.             |
@@ -650,19 +696,26 @@ after you have pushed.
 that reproduces, a minimal reproducer. Sellable on its own as reproducible chaos
 testing with shrinking, which nobody ships today.
 
-The loop is closed for HTTP and Redis: `mis run` and `mis fuzz` do all of that
-end to end, in both placements, against a service that imports nothing. What is
-left of Phase 1 is protocol coverage — the NATS and Postgres codecs — and
+The loop is closed for HTTP, Redis and NATS: `mis run` and `mis fuzz` do all of
+that end to end, in both placements, against a service that imports nothing.
+What is left of Phase 1 is protocol coverage, meaning the Postgres codec, and
 starting the containers a scenario declares rather than pointing at ones you
 already started.
 
-The next adapter is worth naming, because Redis argued for it. Redis needed no
-new fork kind, no new fault and no new dependency, and it took one line to let
-`reorder` fire at a `Statement` fork. **gRPC is the one that pays twice**: it
+NATS has since landed, and it is worth saying what it cost, because Redis
+argued for it on the grounds that an adapter is cheap. Redis needed no new fork
+kind, no new fault and no new dependency, and one line to let `reorder` fire at
+a `Statement` fork. NATS needed none of those either, and still cost more: it is
+not request/reply, so a delivery arrives whenever the server has one, which
+makes it two directional pumps rather than one loop. It also needed a
+correlation map, because an ack subject names its consumer and the sequence and
+never the message it settles.
+
+The next adapter is worth naming. **gRPC is the one that pays twice**: it
 needs HTTP/2, and HTTP/2 is also what makes `reorder` work properly for the
 HTTP adapter, whose current form needs a pipelining client that almost nobody
 writes. Kafka is high value and belongs after the virtual clock, because its
-best failures — rebalance, session timeout, eviction — fire on a timer with no
+best failures (rebalance, session timeout, eviction) fire on a timer with no
 frame crossing the wire, which is precisely what a proxy cannot reach.
 
 **Phase 2, fidelity.** Stop guessing what vendors do. Record real sessions in
@@ -682,7 +735,7 @@ Stripe as the worked example.
 
 **Phase 3, speed.** Quiescence detection first, because it gates everything: to
 advance a virtual clock safely you have to know the system is idle rather than
-mid-computation. It is a heuristic today — an idle window — and deliberately a
+mid-computation. It is a heuristic today, an idle window, and deliberately a
 conservative one, because calling quiescence during a 40ms CPU burst would
 manufacture a failure that never happened. Then the virtual clock, so `ack_wait = "30s"` costs
 microseconds. Then a simulated JetStream, which is first among the simulators
@@ -715,8 +768,8 @@ the dependencies it started, and your service. That is checkable by reading this
 repository, and it is meant to be.
 
 [`docs/INTERFACES.md`](docs/INTERFACES.md) documents the formats anything built
-on top reads and writes, so that anything you want to build around this — in any
-language — has a stable surface to build on.
+on top reads and writes, so that anything you want to build around this, in any
+language, has a stable surface to build on.
 
 ## Not done
 
@@ -737,26 +790,34 @@ language — has a stable surface to build on.
 - **Container orchestration.** `orchestrator::docker` connects to the daemon and
   reports a clear error; it does not start anything. A scenario that declares no
   dependencies never reaches it, and one that declares an already-running
-  dependency by `address` does not either — which is why both worked examples
-  run with no daemon.
+  dependency by `address` does not either, which is why all three worked
+  examples run with no daemon.
 - **A sweep against a dependency you started is not isolated.** misorder did not
   start it, so it is not reset between seeds: what seed 40 wrote is still there
   for seed 41, and a result can then depend on a run before it. That is exactly
   the property `mis fuzz` exists to rule out, so it warns when it sees one. A
-  single `mis run` is unaffected. Not fixed by wiping the thing — that is your
+  single `mis run` is unaffected. Not fixed by wiping the thing: that is your
   Redis, and a harness that flushed it because a scenario pointed at it would be
   a worse problem than the one it solved.
 - **Egress HTTP from a scenario.** Redis proved the egress placement end to end,
   and the same works for HTTP when the engine is driven as a library. What is
   missing is a way to *declare* an HTTP dependency in a scenario, so there is no
   `mis run` path to it.
+- **JetStream dead-letter advisories.** `consumer_filter_excludes_dead_letter`
+  is written and tested, and nothing emits the `DeadLettered` event it fires on,
+  so today it can never fire. A dead letter is a JetStream advisory published on
+  a subject of its own rather than something crossing a proxied connection, so
+  reaching it means subscribing to `$JS.EVENT.ADVISORY.>` alongside the proxy.
+  Marked `planned` in the table above rather than left reading as working. The
+  dead-letter loop is still caught, by `no_infinite_redelivery`, which is what
+  the worked example above shows.
 - **Redis pub/sub.** After `SUBSCRIBE` the server sends messages no command asked
   for, which breaks the one-reply-per-command pairing the adapter and its
   invariants rest on. Refused with a clear message rather than forwarded and
   quietly mis-paired.
 - **TLS, and HTTP/2.** Both adapters are plaintext. The service under test is on
   loopback and a vendor's delivery has already been terminated by the time
-  misorder sees it, so neither is in the way yet — but HTTP/2 is what would make
+  misorder sees it, so neither is in the way yet. HTTP/2 is what would make
   `reorder` useful against a real HTTP client, which today needs pipelining that
   almost nobody does.
 - **Quiescence detection.** An idle window, which is a heuristic. Deliberately a

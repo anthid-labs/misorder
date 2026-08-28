@@ -106,7 +106,7 @@ impl<'a> Driver<'a> {
     /// meaning if two requests can be in flight at once. A driver that waited
     /// for each response before sending the next would give every reorder
     /// nothing to swap with, and a scenario that permitted `reorder` would
-    /// quietly explore no reorderings at all — the worst kind of gap, because
+    /// quietly explore no reorderings at all, the worst kind of gap, because
     /// the scenario reads as thorough and the sweep reports nothing.
     ///
     /// The half-close at the end is the other half of the same contract: a

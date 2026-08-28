@@ -24,7 +24,7 @@
 //!   processing race where the ack lands at a server that has already given up.
 //!
 //! Note what is *not* a fork: an ordinary `PUB` on a subject of the service's
-//! own. [`fork_kinds`](crate::schedule::fork_kinds) gives NATS
+//! own. [`fork_kinds`](crate::schedule::fault::fork_kinds) gives NATS
 //! `Connection`, `Deliver` and `Ack`, and this adapter reaches exactly those.
 //! A service publishing its own outbox therefore has that publish observed but
 //! never perturbed. Widening it means adding a fork kind to that table, which

@@ -64,7 +64,7 @@ WORKDIR /work
 #   docker run --rm --init \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v "$PWD:/work" \
-#     ghcr.io/misorder/misorder run scenario.toml --seed 8837291
+#     ghcr.io/anthid-labs/misorder run scenario.toml --seed 8837291
 ENTRYPOINT ["/usr/local/bin/mis"]
 
 # No CMD on purpose: there is no safe default subcommand. `run` and `fuzz` both

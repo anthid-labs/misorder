@@ -858,7 +858,8 @@ impl Runner {
 
     /// The same sweep, reporting each run as it finishes.
     ///
-    /// A callback rather than a progress bar, for the same reason [`Style`] is
+    /// A callback rather than a progress bar, for the same reason
+    /// [`crate::report::Style`] is
     /// a palette rather than a decision: whether anything should be drawn
     /// depends on whether a terminal is attached, which is a fact about the
     /// process the CLI is running in and not about a sweep. A library that drew

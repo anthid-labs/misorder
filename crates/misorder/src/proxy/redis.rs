@@ -23,8 +23,8 @@
 //! [`Decision::Reorder`] means "let the fork after this one go first", and that
 //! only has meaning when two things can be in flight at once. Over HTTP that
 //! needs pipelining, which almost no real client does. Redis clients pipeline
-//! as a matter of course — it is the standard way to avoid a round trip per
-//! command — so a Redis scenario permitting `reorder` explores real orderings
+//! as a matter of course, since it is the standard way to avoid a round trip per
+//! command, so a Redis scenario permitting `reorder` explores real orderings
 //! rather than none.
 //!
 //! # The bug class this is for
@@ -33,7 +33,7 @@
 //! lock expires while it is still working, another client takes it, and the
 //! first client's `DEL key` releases a lock it no longer owns. That is a
 //! delayed command and nothing else, which is one decision in this adapter's
-//! vocabulary — and it is the failure the Redis documentation warns about and
+//! vocabulary, and it is the failure the Redis documentation warns about and
 //! that people implement anyway.
 //!
 //! [`lock_released_by_owner`](crate::invariant::builtin::redis) watches for it
@@ -91,7 +91,7 @@ const MAX_DEPTH: usize = 32;
 /// Commands that make the server speak without being asked.
 ///
 /// Refused rather than forwarded. Every reply this adapter reads is matched to
-/// the command that caused it, and a pushed pub/sub message has no command —
+/// the command that caused it, and a pushed pub/sub message has no command:
 /// forwarding one would shift every later reply onto the wrong command and turn
 /// the invariants into a random-number generator.
 const PUSHES: [&str; 6] = [

@@ -63,7 +63,7 @@ flowchart LR
         w1["connection 1"] --> ws["one PRNG,<br/>advanced per call"]
         w2["connection 2"] --> ws
         w3["connection 3"] --> ws
-        ws --> wout["answer depends on which task<br/>reached it first — the OS decides"]
+        ws --> wout["answer depends on which task<br/>reached it first, the OS decides"]
     end
 
     subgraph right["What misorder does"]
@@ -79,7 +79,7 @@ flowchart LR
 
 A run has several proxied connections being served at once. Drawing from one
 sequential stream makes the schedule depend on task arrival order, so the same
-seed produces a different run on a different machine — determinism becomes a
+seed produces a different run on a different machine, and determinism becomes a
 claim rather than a property, and the first reproducer that fails to reproduce
 ends the tool.
 
@@ -103,7 +103,7 @@ by every protocol, and what varies is *where* each one can fire.
 flowchart TB
     written["what you write in the scenario<br/>enabled = reorder, delay, connection_drop"]
     fork["a fork the adapter reached<br/>PointKind + connection + ordinal"]
-    applies["applies_at — the pivot<br/>which faults can fire at this kind of fork"]
+    applies["applies_at, the pivot<br/>which faults can fire at this kind of fork"]
     draw["draw: perturb at all?<br/>then which of the candidates?"]
     decision["Decision the adapter carries out<br/>Deliver, Drop, Reorder, CloseConnection, Corrupt, Hold"]
     neutral["neutral choice<br/>deliver immediately, change nothing"]
@@ -139,14 +139,14 @@ flowchart LR
 ```
 
 Redis was the test of that claim, and it passed: a whole new protocol needed no
-new `PointKind` and no new fault. It did move one line — `reorder` now applies at
+new `PointKind` and no new fault. It did move one line: `reorder` now applies at
 `Statement` as well, because Redis clients pipeline and two commands really can
 be in flight at once. A table that reached only deliveries and responses would
 have left that unexplored while a scenario naming `reorder` read as covering it.
 
 Eight user-facing faults collapse into six decisions, because faults name
 **intent** and decisions name **mechanism**. `swallow_ack` and `redelivery` are
-both `Drop` — one loses the receipt on the way back, the other loses the message
+both `Drop`: one loses the receipt on the way back, the other loses the message
 on the way out.
 
 Two safety nets stop a fault firing where it cannot be carried out: `applies_at`
@@ -215,13 +215,13 @@ The same adapter, and the only thing that differs is which way the arrow points.
 
 ```mermaid
 flowchart LR
-    subgraph ingress["Ingress — the vendor calls you"]
+    subgraph ingress["Ingress: the vendor calls you"]
         direction LR
         d1["workload driver<br/>(stands in for Stripe)"] -->|"POST /webhooks"| p1["proxy"]
         p1 -->|"forwards"| s1["your service"]
     end
 
-    subgraph egress["Egress — you call the vendor"]
+    subgraph egress["Egress: you call the vendor"]
         direction LR
         s2["your service"] -->|"POST /orders"| p2["proxy"]
         p2 -->|"forwards"| v2["the vendor"]
@@ -302,14 +302,14 @@ sequenceDiagram
     P->>S: forward
     D->>P: evt_3 again (Stripe delivers at least once)
     P->>S: forward
-    Note over S: deduplicated on event id — correct
+    Note over S: deduplicated on event id, correct
     D->>P: evt_4 payment_failed
     Note over P: fork (Deliver, conn 1, ordinal 4)<br/>schedule says Reorder
     D->>P: evt_5 subscription.deleted
     P->>S: evt_5 first
     Note over S: status = canceled
     P->>S: then evt_4
-    Note over S: status = past_due — reopened
+    Note over S: status = past_due, reopened
     C->>S: GET /checks/reopened_after_cancel
     S-->>C: one row
 ```
@@ -317,11 +317,11 @@ sequenceDiagram
 Only that one fork matters. A reorder at ordinal 0 puts `evt_2` before `evt_1`
 and nothing breaks; at ordinal 5 the last delivery is deferred with nothing
 following it, so it is released at close and arrives last anyway. Measured over
-seeds 1–100: twenty-one seeds reorder *something*, four break the invariant, and
+seeds 1 to 100: twenty-one seeds reorder *something*, four break the invariant, and
 they are exactly the four that reorder at ordinal 4.
 
 Neither `delay` nor `connection_drop` can produce it. `delay` changes when a
-request is written, never the order — each request is answered before the next
+request is written, never the order, because each request is answered before the next
 is sent. `connection_drop` can only *prevent* the bug: drop `evt_5` and there is
 no cancellation to violate.
 

@@ -1,7 +1,7 @@
 //! Answering forks from a recorded trace instead of from a PRNG.
 //!
 //! Replay is not a separate execution mode. It is the same run with a different
-//! [`DecisionSource`](crate::schedule::DecisionSource) plugged in, which is
+//! [`DecisionSource`] plugged in, which is
 //! what makes it trustworthy: if replay had its own code path, the thing it
 //! reproduced would be that path and not the original run.
 //!
