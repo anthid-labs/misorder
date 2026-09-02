@@ -75,6 +75,7 @@ jobs:
     name: Trivy
 
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     env:
       IMAGE_REF: ${{ inputs.image_repository }}:${{ inputs.image_tag }}

@@ -23,6 +23,11 @@ jobs:
   lint-and-test:
     name: Lint and test
     runs-on: ubuntu-latest
+    # Without this a hung test holds the runner until GitHub's six-hour
+    # default, which is how one livelocked test costs a whole job rather
+    # than failing. The suite runs in seconds, so this is a ceiling, not a
+    # target.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -91,6 +96,7 @@ jobs:
   prepare:
     name: Prepare Docker build context
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: lint-and-test
     # Nothing downstream of here runs for a pull request, so the tag derivation
     # is skipped too rather than computing tags no job will use.
@@ -122,6 +128,7 @@ jobs:
     # QEMU measured ~30x slower than native for this project.
     runs-on: ubuntu-24.04-arm
     needs: prepare
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
@@ -159,6 +166,7 @@ jobs:
     name: Build and push Docker image (Amd64)
     runs-on: ubuntu-latest
     needs: prepare
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
@@ -213,6 +221,7 @@ jobs:
   merge-manifests:
     name: Publish multi-arch manifest
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs:
       - prepare
       - build-and-push-arm
@@ -241,6 +250,9 @@ jobs:
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    # Bounded well above the worst case: the index-availability poll below
+    # gives each crate up to five minutes to appear, and there are two.
+    timeout-minutes: 30
     # Last, and only after the image is out. A failed build, a failed test or a
     # vulnerable image should not produce a release on crates.io, and a publish
     # cannot be taken back: a version number is burned even if the crate is
@@ -341,6 +353,7 @@ jobs:
   report:
     name: Report
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs:
       - prepare
       - merge-manifests

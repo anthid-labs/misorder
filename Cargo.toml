@@ -18,9 +18,11 @@ homepage = "https://github.com/anthid-labs/misorder"
 authors = ["Dallin Wright <dallinwright@anthid.com>"]
 # Stated rather than inferred, so a build on an older toolchain fails with the
 # version it needs instead of an error inside a dependency. Edition 2024 puts
-# the floor at 1.85 and nothing in the tree currently raises it. `cargo clippy`
-# enforces this, so it cannot drift from what the code uses.
-rust-version = "1.85"
+# the floor at 1.85; this is held at 1.87 as a deliberate policy floor rather
+# than a technical one, because nothing in the tree needs it yet. `cargo clippy`
+# enforces the declared version, so it cannot drift below what the code uses -
+# it will not tell you the floor is higher than it has to be.
+rust-version = "1.87"
 
 [profile.release]
 opt-level = 3

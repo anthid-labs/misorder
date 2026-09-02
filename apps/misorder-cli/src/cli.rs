@@ -983,6 +983,86 @@ mod tests {
         );
     }
 
+    /// The workspace dependency on `misorder` names the version that will be
+    /// published, not the one being built.
+    ///
+    /// Cargo cannot inherit `version` into `[workspace.dependencies]`, so it is
+    /// written out a second time, and a stale value is not a build error.
+    /// Locally the `path` wins and everything passes. It is `cargo publish`
+    /// that rewrites the dependency to the version in the manifest, so a bump
+    /// that misses this line ships a `misorder-cli` requiring `misorder
+    /// ^<old>`, which resolves against the previous library on crates.io rather
+    /// than the one it was built and tested with. Nothing fails; the wrong code
+    /// is simply what users get.
+    ///
+    /// Only one direction needs guarding. A dependency version *ahead* of the
+    /// package version fails the build outright, because no path crate
+    /// satisfies the requirement. It is the version left *behind* that cargo
+    /// accepts, since the newer path crate still satisfies the older caret
+    /// requirement, and that is the one that reaches crates.io.
+    ///
+    /// Caught here rather than in CI because CI finds it after the publish,
+    /// and a version number on crates.io is burned even if the crate is yanked
+    /// a minute later.
+    #[test]
+    fn the_workspace_dependency_version_matches_the_package_version() {
+        /// The value of `key = "..."` in `[<section>]`, as text.
+        fn quoted(manifest: &str, section: &str, key: &str) -> Option<String> {
+            let mut inside = false;
+
+            for line in manifest.lines() {
+                let line = line.trim();
+
+                if line.starts_with('[') {
+                    inside = line == section;
+                    continue;
+                }
+
+                if !inside || !line.starts_with(key) {
+                    continue;
+                }
+
+                // The dependency entry is an inline table, so take the first
+                // quoted run after the key rather than the rest of the line.
+                let (name, rest) = line.split_once('=')?;
+
+                if name.trim() != key {
+                    continue;
+                }
+
+                let after = rest.find('"')? + 1;
+                let end = rest[after..].find('"')? + after;
+
+                return Some(rest[after..end].to_string());
+            }
+
+            None
+        }
+
+        let root = include_str!("../../../Cargo.toml");
+
+        let package = quoted(root, "[workspace.package]", "version")
+            .expect("[workspace.package] has no version");
+
+        // Read out of the dependency line's inline table.
+        let dependency = root
+            .lines()
+            .find(|line| line.trim_start().starts_with("misorder = {"))
+            .and_then(|line| {
+                let start = line.find("version = \"")? + "version = \"".len();
+                let end = line[start..].find('"')? + start;
+                Some(line[start..end].to_string())
+            })
+            .expect("[workspace.dependencies] has no misorder version");
+
+        assert_eq!(
+            package, dependency,
+            "[workspace.package] version is {package} but [workspace.dependencies] \
+             publishes misorder-cli against misorder {dependency}; bump both or the \
+             published CLI resolves against the wrong library"
+        );
+    }
+
     use super::*;
     use clap::Parser;
 

@@ -23,6 +23,7 @@ jobs:
     name: SAST (Semgrep)
 
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     # The engine is pinned so a rule-engine release cannot turn a green branch
     # red on its own. The rule packs are still fetched from the registry on
@@ -98,6 +99,7 @@ jobs:
     name: Dependency advisories (cargo audit)
 
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
