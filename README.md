@@ -1,5 +1,4 @@
 # misorder
-[![🛡️ Container image scan](https://github.com/anthid-labs/misorder/actions/workflows/container-scan.yml/badge.svg)](https://github.com/anthid-labs/misorder/actions/workflows/container-scan.yml)
 [![🔐 static security analysis](https://github.com/anthid-labs/misorder/actions/workflows/security-static.yml/badge.svg)](https://github.com/anthid-labs/misorder/actions/workflows/security-static.yml)
 [![🏗️ Build and Push Docker Image](https://github.com/anthid-labs/misorder/actions/workflows/build-and-push.yml/badge.svg)](https://github.com/anthid-labs/misorder/actions/workflows/build-and-push.yml)
 
