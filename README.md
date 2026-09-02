@@ -904,12 +904,12 @@ one.
 
 ### Getting set up
 
-Rust 1.87 or newer. Edition 2024 puts the floor at 1.85 and nothing in the tree
-needs more than that yet, so 1.87 is a policy floor rather than a technical one.
-It is stated in `[workspace.package]` rather than inferred, so a build on an
-older toolchain fails with the version it needs instead of with an error inside
-a dependency, and `cargo clippy` enforces it so the declared version cannot
-drift below what the code uses.
+Rust 1.88 or newer. Edition 2024 puts the floor at 1.85, but `time` 0.3.47 and
+later declare 1.88, and the MSRV-aware resolver will not select them under a
+lower one. It is stated in `[workspace.package]` rather than inferred, so a
+build on an older toolchain fails with the version it needs instead of with an
+error inside a dependency, and `cargo clippy` enforces it so the declared
+version cannot drift below what the code uses.
 
 ```bash
 git clone https://github.com/anthid-labs/misorder
