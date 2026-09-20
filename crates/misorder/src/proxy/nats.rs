@@ -48,6 +48,30 @@
 //! direction reads it back. The ack subject is unique per delivery, which is
 //! what makes that a lookup rather than a guess.
 //!
+//! # Recognising a dead letter
+//!
+//! JetStream has no dead letter queue. Whatever sends a message to one is the
+//! *service*, with an ordinary `PUB` that already crosses this proxy, so there
+//! is nothing missing from the wire. What is missing is which publish that is,
+//! and the answer is the same identity the rest of this tool uses: the payload.
+//!
+//! A payload this proxy handed to a consumer, going back out on a different
+//! subject, is the service moving a message it could not handle. That is a dead
+//! letter whether or not anyone called it one, and it is reported as
+//! [`NatsEvent::DeadLettered`] naming both subjects, which is what
+//! `consumer_filter_excludes_dead_letter` needs to see that a consumer's own
+//! filter matches where its rejects go.
+//!
+//! Read from traffic rather than from a `dead_letter_subject` key in the
+//! scenario, for the reason every built-in works that way: a declared subject
+//! would check the layout somebody wrote down, and the loop is caused by the
+//! one the service actually publishes to.
+//!
+//! It is a correlation and not a proof, so it is built to miss rather than to
+//! invent. A service that rewraps or re-encodes the payload before
+//! republishing is not caught, and the failure is still caught empirically by
+//! `no_infinite_redelivery`, which watches the same message come round.
+//!
 //! # What this adapter cannot do, and why Phase 3 exists
 //!
 //! `ack_wait` expiry fires on the server's own timer with no frame crossing the
@@ -65,7 +89,7 @@
 //!
 //! [`FaultKind::AckTimeout`]: crate::schedule::FaultKind::AckTimeout
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -157,6 +181,10 @@ impl Adapter for NatsAdapter {
         })?;
 
         let context = Arc::new(context);
+
+        // One per adapter, not one per connection. See `Handled`.
+        let handled = Arc::new(Handled::default());
+
         let mut connections = JoinSet::new();
 
         loop {
@@ -185,8 +213,10 @@ impl Adapter for NatsAdapter {
             }
 
             let context = Arc::clone(&context);
+            let handled = Arc::clone(&handled);
 
-            connections.spawn(async move { serve_connection(&context, connection, client).await });
+            connections
+                .spawn(async move { serve_connection(&context, connection, client, handled).await });
         }
 
         let mut first_error = None;
@@ -223,6 +253,100 @@ impl Adapter for NatsAdapter {
 struct Pending {
     /// Ack subject to the subject that was delivered on it.
     subjects: Mutex<HashMap<String, String>>,
+}
+
+/// How many delivered payloads to keep before the oldest is forgotten.
+///
+/// A bound rather than a preference. This grows with every distinct message a
+/// run delivers, and a harness that held all of them for the life of a sweep
+/// would be a memory leak with a deterministic schedule. Oldest first, because
+/// a dead letter follows the delivery that caused it within a handler, not an
+/// hour later.
+const MAX_HANDLED: usize = 4096;
+
+/// What this proxy has handed to a consumer, so a publish can be recognised as
+/// a message coming back out.
+///
+/// Shared across every connection this adapter serves rather than kept per
+/// connection: a service is free to consume on one client and publish on
+/// another, and a correlation that only looked inside one connection would miss
+/// the loop on every service that does.
+///
+/// Keyed by digest rather than by the payload, because the payload is the
+/// user's to choose the size of and this is the proxy rather than the report.
+/// Thirty-two bytes an entry is a bound; a megabyte an entry is not.
+#[derive(Debug, Default)]
+struct Handled {
+    origins: Mutex<Origins>,
+}
+
+#[derive(Debug, Default)]
+struct Origins {
+    subjects: HashMap<[u8; 32], String>,
+    /// Insertion order, so the oldest entry is the one that goes.
+    order: VecDeque<[u8; 32]>,
+}
+
+impl Handled {
+    /// Remembers that this payload was delivered on this subject.
+    ///
+    /// Called before the delivery is written, for the same reason the ack
+    /// correlation is: the service can publish as soon as the bytes land, and a
+    /// map written afterwards would lose that race and report the republish as
+    /// ordinary traffic.
+    fn delivered(&self, subject: &str, payload: &Bytes) {
+        // An empty payload is not an identity. JetStream control messages and
+        // heartbeats carry one, and treating them as the same message would
+        // make every later empty publish a dead letter.
+        if payload.is_empty() {
+            return;
+        }
+
+        let key = digest(payload);
+        let mut origins = self.origins.lock().expect("handled mutex poisoned");
+
+        if origins.subjects.insert(key, subject.to_string()).is_none() {
+            origins.order.push_back(key);
+
+            while origins.order.len() > MAX_HANDLED {
+                if let Some(oldest) = origins.order.pop_front() {
+                    origins.subjects.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    /// What a publish is, given what this proxy has already delivered.
+    ///
+    /// The same payload on a different subject is the service moving a message
+    /// it could not handle. The same payload on the *same* subject is a retry
+    /// of the publish rather than a dead letter, and reporting it as one would
+    /// fire the invariant on every service that republishes to where it
+    /// already was.
+    fn classify(&self, subject: &str, payload: &Bytes) -> NatsEvent {
+        let ordinary = || NatsEvent::Published {
+            subject: subject.to_string(),
+            payload: payload.clone(),
+        };
+
+        if payload.is_empty() {
+            return ordinary();
+        }
+
+        let origins = self.origins.lock().expect("handled mutex poisoned");
+
+        match origins.subjects.get(&digest(payload)) {
+            Some(origin) if origin != subject => NatsEvent::DeadLettered {
+                subject: subject.to_string(),
+                origin_subject: origin.clone(),
+            },
+            _ => ordinary(),
+        }
+    }
+}
+
+fn digest(payload: &Bytes) -> [u8; 32] {
+    blake3::hash(payload).into()
 }
 
 impl Pending {
@@ -266,6 +390,7 @@ async fn serve_connection(
     context: &ProxyContext,
     connection: ConnectionId,
     client: TcpStream,
+    handled: Arc<Handled>,
 ) -> Result<()> {
     let upstream = TcpStream::connect(&context.upstream)
         .await
@@ -292,6 +417,7 @@ async fn serve_connection(
         BufReader::new(client_read),
         upstream_write,
         Arc::clone(&pending),
+        Arc::clone(&handled),
         closed.clone(),
     );
 
@@ -301,6 +427,7 @@ async fn serve_connection(
         BufReader::new(upstream_read),
         client_write,
         Arc::clone(&pending),
+        Arc::clone(&handled),
         closed.clone(),
     );
 
