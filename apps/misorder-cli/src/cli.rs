@@ -26,7 +26,7 @@ use misorder::report::Style;
 use misorder::runner::{FuzzReport, Outcome, Run, Runner, Seeds, Shard};
 use misorder::scenario::file::{Resolved, Scenario};
 use misorder::shrink;
-use misorder::trace::Trace;
+use misorder::trace::{Divergence, Trace};
 
 /// Where a scenario is read from when no path is given.
 const DEFAULT_SCENARIO_PATH: &str = "scenario.toml";
@@ -708,7 +708,31 @@ async fn replay(trace_path: &Path, scenario_path: &Path, style: &Style) -> Resul
 
     let outcome = runner.execute(Run::Replay(trace.clone())).await?;
 
+    let diverged = outcome
+        .divergence
+        .as_ref()
+        .filter(|divergence| !divergence.is_empty());
+
     if outcome.passed() {
+        // The case that actively misleads, and the reason any of this is
+        // reported at all. "Did not reproduce" reads as "the bug is fixed". If
+        // the run did not follow the trace, it says nothing of the kind: the
+        // schedule this file describes was never the one that ran, so the
+        // failure was never given the chance to happen.
+        //
+        // A harness failure rather than a pass, because that is what it is.
+        // The reproducer stopped being a reproducer, which is a fact about the
+        // file and the code around it, not a finding about the service.
+        if let Some(divergence) = diverged {
+            eprint!("{}", render_divergence(trace_path, divergence, style));
+
+            return Err(Error::Trace(format!(
+                "{} did not reproduce, and the run did not follow it either, so nothing here \
+                 says whether the failure is gone",
+                trace_path.display()
+            )));
+        }
+
         eprintln!(
             "{}: replayed {} decision(s) and the failure {}",
             trace_path.display(),
@@ -719,11 +743,75 @@ async fn replay(trace_path: &Path, scenario_path: &Path, style: &Style) -> Resul
         return Ok(Status::Passed);
     }
 
+    // It reproduced, so this is still a finding and still exit 2. Said anyway,
+    // because a reproducer that only reproduces while taking a different path
+    // through the system is one that will stop without warning.
+    if let Some(divergence) = diverged {
+        eprint!("{}", render_divergence(trace_path, divergence, style));
+    }
+
     if let Some(reproducer) = outcome.failure() {
         println!("{}", reproducer.render_with(style));
     }
 
     Ok(Status::Failed)
+}
+
+/// How many forks of each kind to name before summarising the rest.
+///
+/// A run that diverges early diverges at every fork after it, so the full list
+/// can be the whole trace. The first few say where it started going wrong,
+/// which is the part anybody acts on.
+const SHOWN: usize = 5;
+
+/// What a replay that did not follow its trace looks like at a terminal.
+fn render_divergence(path: &Path, divergence: &Divergence, style: &Style) -> String {
+    use std::fmt::Write;
+
+    let mut out = format!(
+        "{}: {}\n",
+        path.display(),
+        style.paint(style.warn, "the run did not follow this trace")
+    );
+
+    // Unused first. It is the stronger signal: a decision the run never reached
+    // means the run went somewhere the recording did not, whereas an unexpected
+    // fork can just mean the run got further.
+    if !divergence.unused.is_empty() {
+        let _ = writeln!(
+            out,
+            "  {} decision(s) in the trace that the run never reached",
+            divergence.unused.len()
+        );
+        out.push_str(&listed(&divergence.unused));
+    }
+
+    if !divergence.unmatched.is_empty() {
+        let _ = writeln!(
+            out,
+            "  {} fork(s) the run reached that the trace does not describe",
+            divergence.unmatched.len()
+        );
+        out.push_str(&listed(&divergence.unmatched));
+    }
+
+    out
+}
+
+fn listed(keys: &[misorder::trace::PointKey]) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+
+    for key in keys.iter().take(SHOWN) {
+        let _ = writeln!(out, "      {key}");
+    }
+
+    if keys.len() > SHOWN {
+        let _ = writeln!(out, "      ... and {} more", keys.len() - SHOWN);
+    }
+
+    out
 }
 
 async fn shrink_trace(
@@ -749,10 +837,36 @@ async fn shrink_trace(
         .shrink(&outcome, shrink::Limits { max_attempts })
         .await?;
 
+    // Replayed rather than trusted, for two reasons.
+    //
+    // A shrunk trace that no longer fails is a bug in the shrinker rather than
+    // a smaller reproducer, and writing one out would hand somebody a file to
+    // commit that does not do the one thing it is for.
+    //
+    // And what gets written is this replay's own recording, not the original
+    // edited down. Shrinking neutralises decisions, so the run the shrunk
+    // trace produces reaches forks the original never got to and skips ones it
+    // did. A file that still described the original would report that
+    // difference as divergence on every replay from then on, which is how a
+    // real signal gets trained out of people.
+    let verified = runner
+        .clone()
+        .quiet()
+        .execute(Run::Replay(report.trace.clone()))
+        .await?;
+
+    if verified.passed() {
+        return Err(Error::Trace(format!(
+            "the shrunk trace no longer reproduces the failure in {}, so there is nothing to \
+             write. That is a bug in the shrinker, not in your scenario",
+            trace_path.display()
+        )));
+    }
+
     eprintln!(
         "shrank {} decisions to {} in {} re-run(s){}",
         report.before,
-        report.after,
+        verified.trace.active_count(),
         report.attempts,
         if report.exhausted {
             "; budget exhausted, this may not be minimal"
@@ -762,7 +876,7 @@ async fn shrink_trace(
     );
 
     if let Some(destination) = out {
-        write_trace(&report.trace, destination)?;
+        write_trace(&verified.trace, destination)?;
     }
 
     Ok(Status::Failed)

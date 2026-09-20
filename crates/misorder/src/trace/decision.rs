@@ -77,6 +77,21 @@ pub struct PointKey {
     pub ordinal: u64,
 }
 
+/// Reads the way a reproducer line does, so a divergence and a decision can sit
+/// in the same report without the reader having to translate between two
+/// spellings of the same fork.
+impl std::fmt::Display for PointKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "conn:{} {} #{}",
+            self.connection,
+            self.kind.noun(),
+            self.ordinal
+        )
+    }
+}
+
 /// A fork, with the context needed to describe it to a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionPoint {

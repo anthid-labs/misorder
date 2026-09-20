@@ -24,7 +24,7 @@ pub mod decision;
 pub mod replay;
 
 pub use decision::{Decision, DecisionPoint, PointKey, PointKind};
-pub use replay::Replay;
+pub use replay::{Divergence, Replay};
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;

@@ -50,6 +50,17 @@ use crate::trace::{Decision, DecisionPoint, Recorder, Trace};
 /// make the answer depend on when it was asked.
 pub trait DecisionSource: Send + Sync {
     fn decide(&self, point: &DecisionPoint) -> Decision;
+
+    /// Where the run has gone somewhere this source did not describe.
+    ///
+    /// `None` when there is nothing to diverge *from*. A seed answers every
+    /// fork it is asked and has no opinion about which forks should exist, so
+    /// "unexpected fork" is not a thing that can happen to it. Only a recorded
+    /// trace can be departed from, which is why this is on the source rather
+    /// than on the scheduler: the scheduler would have to guess.
+    fn divergence(&self) -> Option<crate::trace::Divergence> {
+        None
+    }
 }
 
 /// The proxies' single entry point for anything that could go two ways.
@@ -116,6 +127,12 @@ impl Scheduler {
     /// Everything decided so far.
     pub fn trace(&self) -> Trace {
         self.recorder.snapshot()
+    }
+
+    /// Where this run departed from the trace it was replaying, if it was
+    /// replaying one.
+    pub fn divergence(&self) -> Option<crate::trace::Divergence> {
+        self.source.divergence()
     }
 
     pub fn recorder(&self) -> &Recorder {

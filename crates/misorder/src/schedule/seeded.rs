@@ -156,6 +156,17 @@ mod tests {
     use super::*;
     use crate::event::ConnectionId;
 
+    /// A seed has no opinion about which forks should exist, so there is no
+    /// such thing as departing from it. Reporting an empty divergence instead
+    /// would read as "this run followed its trace", which is a claim about a
+    /// trace that was never involved.
+    #[test]
+    fn a_seeded_source_has_nothing_to_diverge_from() {
+        let source = Seeded::new(1, FaultKind::ALL.to_vec(), Profile::default());
+
+        assert!(DecisionSource::divergence(&source).is_none());
+    }
+
     fn points() -> Vec<DecisionPoint> {
         (0..200)
             .map(|n| {

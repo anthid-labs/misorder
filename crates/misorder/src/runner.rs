@@ -192,6 +192,15 @@ pub struct Outcome {
     pub declared_deps: Vec<String>,
     pub declared_faults: Vec<crate::schedule::FaultKind>,
 
+    /// Where this run departed from the trace it was replaying.
+    ///
+    /// `None` for a seeded run, which has nothing to depart from. Recorded
+    /// rather than acted on here, because the two callers want opposite
+    /// things: the shrinker replays candidates it has deliberately altered and
+    /// expects divergence, and `mis replay` replays a trace that is supposed to
+    /// describe the run exactly. The policy belongs where the intent is known.
+    pub divergence: Option<crate::trace::Divergence>,
+
     /// BLAKE3 of the scenario file, when it came from one.
     pub scenario_digest: Option<String>,
 
@@ -270,6 +279,11 @@ impl Outcome {
                 })
                 .collect(),
             reproducer: None,
+            divergence: self
+                .divergence
+                .as_ref()
+                .filter(|divergence| !divergence.is_empty())
+                .map(Into::into),
             started_at: self.started_at.clone(),
             elapsed_ms: run::millis(self.elapsed),
         };
@@ -593,6 +607,7 @@ impl Runner {
                 .map(str::to_string)
                 .collect(),
             declared_faults: self.scenario.faults.clone(),
+            divergence: scheduler.divergence(),
             scenario_digest: self.scenario.digest.clone(),
             started_at,
         })
@@ -1126,6 +1141,67 @@ builtin = "eventually_quiescent"
         )
     }
 
+    fn outcome_with(divergence: Option<crate::trace::Divergence>) -> Outcome {
+        Outcome {
+            scenario: "unit".to_string(),
+            seed: 1,
+            trace: Trace::new(1, "unit"),
+            violations: Vec::new(),
+            events: Vec::new(),
+            elapsed: Duration::ZERO,
+            declared_deps: Vec::new(),
+            declared_faults: Vec::new(),
+            divergence,
+            scenario_digest: None,
+            started_at: run::now_rfc3339(),
+        }
+    }
+
+    fn key(ordinal: u64) -> crate::trace::PointKey {
+        crate::trace::PointKey {
+            kind: crate::trace::PointKind::Ack,
+            connection: 1,
+            ordinal,
+        }
+    }
+
+    /// The whole point of carrying it: a consumer reading the report has to be
+    /// able to tell that the run it describes is not the run the trace
+    /// described.
+    #[test]
+    fn a_report_carries_a_divergence_the_run_had() {
+        let outcome = outcome_with(Some(crate::trace::Divergence {
+            unmatched: vec![key(4)],
+            unused: vec![key(0), key(1)],
+        }));
+
+        let record = outcome
+            .report()
+            .divergence
+            .expect("a replay that departed from its trace says so");
+
+        assert_eq!(record.unmatched, 1);
+        assert_eq!(record.unused, 2);
+    }
+
+    /// Absent rather than present-and-zero, so "this field is here" is the
+    /// whole signal and a consumer does not have to read two numbers to find
+    /// out nothing happened.
+    #[test]
+    fn a_faithful_replay_leaves_the_field_out_of_the_report() {
+        assert!(
+            outcome_with(Some(crate::trace::Divergence::default()))
+                .report()
+                .divergence
+                .is_none()
+        );
+
+        assert!(
+            outcome_with(None).report().divergence.is_none(),
+            "and a seeded run has no trace to have departed from"
+        );
+    }
+
     #[test]
     fn a_shard_selects_a_spread_of_seeds_rather_than_a_block() {
         let shard = Shard::new(7, 64).expect("valid");
@@ -1229,6 +1305,7 @@ builtin = "eventually_quiescent"
             elapsed: Duration::from_secs(1),
             declared_deps: vec!["nats".to_string(), "postgres".to_string()],
             declared_faults: vec![crate::schedule::FaultKind::Reorder],
+            divergence: None,
             scenario_digest: Some("abc".to_string()),
             started_at: run::now_rfc3339(),
         };
@@ -1256,6 +1333,7 @@ builtin = "eventually_quiescent"
             elapsed: Duration::ZERO,
             declared_deps: Vec::new(),
             declared_faults: Vec::new(),
+            divergence: None,
             scenario_digest: None,
             started_at: run::now_rfc3339(),
         };

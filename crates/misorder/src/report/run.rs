@@ -193,9 +193,58 @@ pub struct RunReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reproducer: Option<String>,
 
+    /// Where a replay departed from the trace it was given.
+    ///
+    /// Absent on a seeded run, which has no trace to depart from, and absent on
+    /// a replay that followed one exactly. Present means the run went somewhere
+    /// the recording did not, so whatever this report says it proved is about a
+    /// different run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub divergence: Option<DivergenceRecord>,
+
     /// RFC3339, UTC.
     pub started_at: String,
     pub elapsed_ms: u64,
+}
+
+/// A replay that did not follow its trace, in the form a consumer reads.
+///
+/// Counts first, because that is what a dashboard wants, and the keys after it
+/// capped at what a person can act on. A run that diverged early diverges in
+/// every fork after it, and a report carrying nine hundred of them is one
+/// nobody opens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceRecord {
+    /// Forks the run reached that the trace has nothing for.
+    pub unmatched: usize,
+    /// Decisions the trace held that the run never reached.
+    pub unused: usize,
+    /// The first few of each, rendered the way a reproducer line spells a fork.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub first_unmatched: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub first_unused: Vec<String>,
+}
+
+/// How many keys of each kind a record carries.
+pub const DIVERGENCE_SAMPLE: usize = 8;
+
+impl From<&crate::trace::Divergence> for DivergenceRecord {
+    fn from(divergence: &crate::trace::Divergence) -> Self {
+        let sample = |keys: &[crate::trace::PointKey]| -> Vec<String> {
+            keys.iter()
+                .take(DIVERGENCE_SAMPLE)
+                .map(ToString::to_string)
+                .collect()
+        };
+
+        Self {
+            unmatched: divergence.unmatched.len(),
+            unused: divergence.unused.len(),
+            first_unmatched: sample(&divergence.unmatched),
+            first_unused: sample(&divergence.unused),
+        }
+    }
 }
 
 impl RunReport {
@@ -454,6 +503,31 @@ mod tests {
         }
     }
 
+    /// A run that diverged early diverges at every fork after it, so the full
+    /// list can be the whole trace. The counts stay exact and the sample is
+    /// what a person reads.
+    #[test]
+    fn a_divergence_record_keeps_the_counts_and_caps_the_listing() {
+        let many: Vec<crate::trace::PointKey> = (0..40)
+            .map(|ordinal| crate::trace::PointKey {
+                kind: crate::trace::PointKind::Ack,
+                connection: 1,
+                ordinal,
+            })
+            .collect();
+
+        let record = DivergenceRecord::from(&crate::trace::Divergence {
+            unmatched: many.clone(),
+            unused: many[..2].to_vec(),
+        });
+
+        assert_eq!(record.unmatched, 40);
+        assert_eq!(record.unused, 2);
+        assert_eq!(record.first_unmatched.len(), DIVERGENCE_SAMPLE);
+        assert_eq!(record.first_unused.len(), 2);
+        assert_eq!(record.first_unmatched[0], "conn:1 ack #0");
+    }
+
     fn failing(seed: u64, signature: &str, invariant: &str) -> RunReport {
         RunReport {
             format: FORMAT_VERSION,
@@ -477,6 +551,7 @@ mod tests {
             faults: Faults::default(),
             dependencies: Vec::new(),
             reproducer: None,
+            divergence: None,
             started_at: now_rfc3339(),
             elapsed_ms: 1200,
         }

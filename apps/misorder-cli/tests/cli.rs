@@ -195,6 +195,111 @@ fn replaying_a_malformed_trace_reports_the_line() {
     );
 }
 
+/// A scenario that actually completes a run, with no dependency and no service
+/// of its own.
+///
+/// `/bin/cat` is on every machine this is built for, blocks rather than
+/// exiting, and makes no traffic. That is the whole requirement: the run has to
+/// reach the end so the replay below is about the trace rather than about a
+/// service that would not start.
+const RUNNABLE: &str = r#"
+name = "runnable"
+
+[[system]]
+run = "/bin/cat"
+ready_when = "immediate"
+
+[run]
+timeout = "20s"
+quiesce_after = "50ms"
+
+[[workload]]
+wait = "50ms"
+
+[faults]
+enabled = []
+
+[[invariants]]
+builtin = "eventually_quiescent"
+"#;
+
+/// The failure this whole signal exists for.
+///
+/// A reproducer that no longer lines up with the code is replayed, does not
+/// reproduce, and without this says "did not reproduce", which every reader
+/// takes as "the bug is fixed". It is not: the schedule in the file was never
+/// the one that ran. Exit 1, because the reproducer stopped being one, and
+/// that is a fact about the file rather than a finding about the service.
+#[test]
+fn a_replay_that_did_not_follow_its_trace_is_not_reported_as_a_pass() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let scenario = write_scenario(directory.path(), RUNNABLE);
+    let trace = directory.path().join("stale.jsonl");
+
+    std::fs::write(
+        &trace,
+        "{\"t\":\"header\",\"format\":1,\"seed\":1,\"scenario\":\"runnable\"}\n\
+         {\"t\":\"decision\",\"seq\":0,\"at_ms\":1,\"kind\":\"ack\",\"connection\":1,\
+         \"ordinal\":0,\"detail\":\"a fork this scenario no longer has\",\"do\":\"drop\"}\n",
+    )
+    .expect("write trace");
+
+    let output = mis(&[
+        "replay",
+        trace.to_str().expect("utf-8"),
+        "--scenario",
+        scenario.to_str().expect("utf-8"),
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a replay that did not run the schedule it was given is a harness failure, \
+         not a pass and not a finding: {}",
+        stderr(&output)
+    );
+
+    let stderr = stderr(&output);
+
+    assert!(
+        stderr.contains("did not follow this trace"),
+        "it has to say so: {stderr}"
+    );
+    assert!(
+        stderr.contains("conn:1 ack #0"),
+        "and name the fork, so there is somewhere to start: {stderr}"
+    );
+}
+
+/// The other half, and the one that would make this useless if it were noisy:
+/// a replay that followed its trace says nothing about divergence at all.
+#[test]
+fn a_replay_that_followed_its_trace_says_nothing_about_divergence() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let scenario = write_scenario(directory.path(), RUNNABLE);
+    let trace = directory.path().join("faithful.jsonl");
+
+    std::fs::write(
+        &trace,
+        "{\"t\":\"header\",\"format\":1,\"seed\":1,\"scenario\":\"runnable\"}\n",
+    )
+    .expect("write trace");
+
+    let output = mis(&[
+        "replay",
+        trace.to_str().expect("utf-8"),
+        "--scenario",
+        scenario.to_str().expect("utf-8"),
+    ]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        !stderr(&output).contains("did not follow"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn version_and_help_work_without_a_scenario() {
     assert!(mis(&["--version"]).status.success());

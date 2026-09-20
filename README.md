@@ -587,6 +587,32 @@ the artifact you attach to a ticket, hand to a colleague, or run in CI on every
 pull request. It is not a flaky test — it is an exact schedule that either
 reproduces or does not.
 
+Both `mis run --shrink --trace <path>` and `mis shrink -o <path>` write the
+schedule of a run that **actually happened**: the shrunk trace is replayed, and
+what gets written is that replay's own recording. That is what makes the next
+paragraph possible.
+
+#### When it stops reproducing
+
+`mis replay` compares what the run did against what the trace said, and reports
+two things when they disagree: decisions in the file the run never reached, and
+forks the run reached that the file has nothing for. The first is the one that
+matters. It means the run went somewhere the recording did not, so whatever it
+proved is about a different run.
+
+```text
+repro.jsonl: the run did not follow this trace
+  2 decision(s) in the trace that the run never reached
+      conn:1 ack #0
+      conn:2 delivery #3
+```
+
+If the failure still reproduced, that is still a finding and still exit 2, said
+out loud because a reproducer that only reproduces while taking a different path
+is one that will stop without warning. If it did not reproduce, that is exit 1
+rather than a pass. "Did not reproduce" reads as "the bug is fixed", and when
+the run never ran the recorded schedule it means nothing of the kind.
+
 ## The vendor corpus
 
 A directory of `<vendor>.toml` files recording what a vendor was actually
@@ -651,7 +677,8 @@ chases it for an hour, and the next real finding gets the same treatment.
 | A sweep runs against a dependency misorder did not start | Warned at the top of the run: state carries between seeds | 0/2 |
 | A scenario names a `planned` built-in | `mis check` marks it. It never reports as holding | 0 |
 | A built-in is implemented but its protocol feature is compiled out | `mis check` says so, separately from `planned` | 0 |
-| A replay does not follow the trace it was given | Tracked, **not yet reported.** See [Not done](#not-done) | 0/2 |
+| A replay does not follow the trace it was given, and the failure still reproduces | Named, with the forks that disagree. Still a finding, because it still failed | 2 |
+| A replay does not follow the trace it was given, and the failure does not reproduce | `did not reproduce` would read as "fixed" and mean nothing of the kind, so this is a harness failure instead: the reproducer stopped being one | 1 |
 
 An incomplete run is never folded into the passes. Presenting a harness failure
 as a caught bug is how a tool teaches people to ignore it, and folding it into
@@ -894,12 +921,6 @@ real container and failing on disagreement.
   container, and the three worked examples in this repository are still HTTP,
   Redis and NATS. What is missing is a demo service with the bug in it, which is
   documentation rather than engine.
-- **Replay divergence is tracked but not reported.** `Replay` records the forks
-  a run reached that the trace has nothing for, and the decisions the trace held
-  that the run never reached, and answers `is_faithful()`. Nothing outside its
-  own tests reads any of that, so `mis replay` cannot yet tell you that a
-  committed reproducer stopped reproducing the schedule it recorded — which is
-  the one thing a reproducer is for.
 - **JetStream `ack_wait` on demand.** `ack_timeout` holds an ack for a fixed
   span and the server's expiry fires on its own wall clock, so the duplicate
   processing race is explored rather than commanded. Nothing crosses the wire

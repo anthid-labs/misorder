@@ -94,6 +94,14 @@ seam for anything that stores, compares, or comments on results. It carries the
 verdict, the violations, the failure signature, what was permitted versus what
 was used, the scenario digest, and which engine build produced it.
 
+A replay also carries `divergence` when the run did not follow the trace it was
+given: counts of the decisions the run never reached and the forks the trace
+does not describe, plus a sample of each. The field is absent when the run
+followed the trace and absent on a seeded run, which has no trace to depart
+from, so its presence is the whole signal. A consumer that stores reproducers
+should treat it as "this one has stopped reproducing its schedule" rather than
+as a detail of the failure.
+
 `mis fuzz --report-format csv` writes the same sweep as one row per failing
 seed. It is **not** one of the interfaces this document promises: it carries no
 format version, it is free to gain a column in any release, and nothing should
