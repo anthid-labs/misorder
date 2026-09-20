@@ -27,8 +27,14 @@ use crate::proxy::http::HttpAdapter;
 // The set is every protocol `bind_ingress` and `bind_egress` can bind, and it
 // has to stay that way: leaving `nats` out of it built under the default
 // features - where `http` carries the import - and failed only for an embedder
-// who took the NATS adapter on its own.
-#[cfg(any(feature = "http", feature = "nats", feature = "redis"))]
+// who took the NATS adapter on its own. Adding the Postgres adapter reproduced
+// that exactly, which is what the per-feature check loop is for.
+#[cfg(any(
+    feature = "http",
+    feature = "nats",
+    feature = "postgres",
+    feature = "redis"
+))]
 use crate::proxy::{Adapter, ProxyContext};
 use crate::report::Reproducer;
 use crate::report::run::{
@@ -420,6 +426,44 @@ pub struct Runner {
     service_output: bool,
 }
 
+/// The run-wide plumbing every proxy is handed.
+///
+/// One value rather than four parameters, because they always travel together
+/// and there is no such thing as a proxy wired to one run's scheduler and
+/// another's events. It also keeps the egress dispatch below at a size where
+/// the dispatch is the whole body.
+///
+/// A build with no egress adapter still assembles this and then reads none of
+/// it, because `bind_egress` compiles down to its error arm. Allowed rather
+/// than gated away, which would mean spelling the type out twice.
+#[cfg_attr(
+    not(any(feature = "nats", feature = "postgres", feature = "redis")),
+    allow(dead_code)
+)]
+struct Wiring<'a> {
+    scheduler: &'a Scheduler,
+    events: &'a EventSink,
+    cancel: &'a CancellationToken,
+    readiness: &'a crate::proxy::Readiness,
+}
+
+/// Gated rather than allowed dead, because the return type is only in scope in
+/// a build that has an adapter to hand it to. A build with no protocol feature
+/// at all is one an embedder can ask for, and it has to compile.
+#[cfg(any(feature = "nats", feature = "postgres", feature = "redis"))]
+impl Wiring<'_> {
+    /// A context for one proxy, pointed at one upstream.
+    fn context(&self, upstream: &str) -> ProxyContext {
+        ProxyContext::new(
+            self.scheduler.clone(),
+            upstream.to_string(),
+            self.events.clone(),
+            self.cancel.clone(),
+        )
+        .with_readiness(self.readiness.clone())
+    }
+}
+
 impl Runner {
     pub fn new(scenario: Resolved) -> Self {
         Self {
@@ -522,7 +566,7 @@ impl Runner {
                 .deps
                 .postgres
                 .as_ref()
-                .and_then(|postgres| environment.postgres_url(&postgres.database)),
+                .and_then(|postgres| environment.postgres_url(postgres)),
             elapsed: started.elapsed(),
         };
 
@@ -578,8 +622,15 @@ impl Runner {
         // `REDIS_URL` and is never told why.
         let readiness = crate::proxy::Readiness::new();
 
+        let wiring = Wiring {
+            scheduler,
+            events,
+            cancel,
+            readiness: &readiness,
+        };
+
         let mut injected = self
-            .start_egress(&mut running.proxies, scheduler, events, cancel, &readiness)
+            .start_egress(environment, &mut running.proxies, &wiring)
             .await?;
 
         // Which run this is, so a service sharing a dependency with other runs
@@ -660,28 +711,30 @@ impl Runner {
     /// dependency would be and the service is pointed at it through ordinary
     /// configuration. It imports nothing and is not told this is happening.
     ///
-    /// Only dependencies with an `address` today. Starting a container is not
-    /// implemented, and a dependency somebody else brought up is the case that
-    /// actually needs no daemon here.
+    /// Every dependency that is running, however it got there. A container
+    /// misorder started and one somebody else brought up are the same thing by
+    /// this point: an address to put a proxy in front of.
     async fn start_egress(
         &self,
+        environment: &Environment,
         proxies: &mut Vec<tokio::task::JoinHandle<Result<()>>>,
-        scheduler: &Scheduler,
-        events: &EventSink,
-        cancel: &CancellationToken,
-        readiness: &crate::proxy::Readiness,
+        wiring: &Wiring<'_>,
     ) -> Result<Vec<(String, String)>> {
         let mut injected = Vec::new();
 
-        for (protocol, upstream) in self.scenario.deps.external() {
+        for dependency in environment.dependencies() {
             let endpoint = Self::bind_egress(
-                protocol, upstream, proxies, scheduler, events, cancel, readiness,
+                dependency.name,
+                &dependency.address,
+                &self.scenario.deps,
+                proxies,
+                wiring,
             )
             .await?;
 
             tracing::debug!(
-                protocol,
-                upstream,
+                protocol = dependency.name,
+                upstream = %dependency.address,
                 listen = %endpoint.listen,
                 "proxying a declared dependency"
             );
@@ -702,15 +755,18 @@ impl Runner {
     /// the imports at the top of this file are: with none of them compiled in,
     /// every parameter here is for an arm that does not exist. Add a protocol
     /// to the `any(..)` when you add its arm.
-    #[cfg_attr(not(any(feature = "nats", feature = "redis")), allow(unused_variables))]
+    ///
+    /// `deps` is read only by the Postgres arm, which needs the identity the
+    /// scenario gives the session, and the rest only by an arm that exists at
+    /// all. So a build without that adapter always carries at least one
+    /// parameter for an arm that is not there.
+    #[cfg_attr(not(feature = "postgres"), allow(unused_variables))]
     async fn bind_egress(
         protocol: &str,
         upstream: &str,
+        deps: &crate::scenario::file::Deps,
         proxies: &mut Vec<tokio::task::JoinHandle<Result<()>>>,
-        scheduler: &Scheduler,
-        events: &EventSink,
-        cancel: &CancellationToken,
-        readiness: &crate::proxy::Readiness,
+        wiring: &Wiring<'_>,
     ) -> Result<crate::proxy::Endpoint> {
         match protocol {
             #[cfg(feature = "nats")]
@@ -718,13 +774,31 @@ impl Runner {
                 let mut adapter = crate::proxy::nats::NatsAdapter::new();
                 let endpoint = adapter.bind(upstream).await?;
 
-                let context = ProxyContext::new(
-                    scheduler.clone(),
-                    upstream.to_string(),
-                    events.clone(),
-                    cancel.clone(),
-                )
-                .with_readiness(readiness.clone());
+                let context = wiring.context(upstream);
+
+                proxies.push(tokio::spawn(async move { adapter.serve(context).await }));
+
+                Ok(endpoint)
+            }
+            #[cfg(feature = "postgres")]
+            "postgres" => {
+                // The identity the container was created with, or the one a
+                // server somebody else started expects. Either way it is the
+                // scenario's, and it is what the service is handed.
+                let postgres = deps.postgres.as_ref().ok_or_else(|| {
+                    Error::Internal(
+                        "a postgres proxy was bound for a scenario that declares none".to_string(),
+                    )
+                })?;
+
+                let mut adapter = crate::proxy::postgres::PostgresAdapter::new(
+                    &postgres.database,
+                    &postgres.user,
+                    &postgres.password,
+                );
+                let endpoint = adapter.bind(upstream).await?;
+
+                let context = wiring.context(upstream);
 
                 proxies.push(tokio::spawn(async move { adapter.serve(context).await }));
 
@@ -735,13 +809,7 @@ impl Runner {
                 let mut adapter = crate::proxy::redis::RedisAdapter::new();
                 let endpoint = adapter.bind(upstream).await?;
 
-                let context = ProxyContext::new(
-                    scheduler.clone(),
-                    upstream.to_string(),
-                    events.clone(),
-                    cancel.clone(),
-                )
-                .with_readiness(readiness.clone());
+                let context = wiring.context(upstream);
 
                 proxies.push(tokio::spawn(async move { adapter.serve(context).await }));
 

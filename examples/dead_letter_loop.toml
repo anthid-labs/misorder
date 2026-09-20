@@ -24,14 +24,18 @@
 # system, and the two lines that combine to cause this one live in different
 # files.
 #
-# ── What is deliberately not here ─────────────────────────────────────────────
+# ── Why this one names an address ─────────────────────────────────────────────
 #
-# No image, no container. `[deps.nats]` names an address, so this points at a
-# server somebody else started and misorder starts nothing.
+# `[deps.nats]` names an address, so this points at a server somebody else
+# started and misorder starts nothing. Delete the `address` line and misorder
+# starts a container of its own, with JetStream turned on, and removes it when
+# the run ends. The address is kept here because a worked example should run on
+# a machine with no daemon.
 #
-# A sweep against one of those is not isolated: the stream misorder did not
-# create is not reset between seeds, so what seed 40 published is still there
-# for seed 41. Give a sweep a server of its own.
+# A sweep against a server misorder did not start is not isolated: the stream
+# it did not create is not reset between seeds, so what seed 40 published is
+# still there for seed 41. Give a sweep a server of its own, which is what
+# leaving `address` out does.
 
 name = "dead_letter_loop"
 

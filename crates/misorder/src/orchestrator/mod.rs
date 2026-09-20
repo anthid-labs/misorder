@@ -22,6 +22,7 @@
 
 pub mod docker;
 pub mod process;
+pub mod ready;
 pub mod topology;
 
 use std::collections::BTreeMap;
@@ -49,12 +50,26 @@ pub struct Dependency {
 }
 
 /// Every dependency a scenario declared, running.
+///
+/// Holds the daemon connection when it started anything, so teardown needs no
+/// second connect. An environment of dependencies somebody else started holds
+/// none, which is what lets a scenario pointing at `docker compose up` run on
+/// a machine where misorder cannot reach Docker at all.
 #[derive(Debug, Default)]
 pub struct Environment {
     dependencies: Vec<Dependency>,
+    daemon: Option<docker::Client>,
 }
 
 impl Environment {
+    /// An environment misorder started containers for.
+    fn owning(dependencies: Vec<Dependency>, daemon: docker::Client) -> Self {
+        Self {
+            dependencies,
+            daemon: Some(daemon),
+        }
+    }
+
     /// Starts the declared dependencies and applies their topology.
     ///
     /// Topology first, service second, always. A stream created after the
@@ -93,6 +108,7 @@ impl Environment {
                         container_id: EXTERNAL.to_string(),
                     })
                     .collect(),
+                daemon: None,
             });
         }
 
@@ -132,13 +148,13 @@ impl Environment {
         }
 
         if let Some(postgres) = &deps.postgres {
-            let address = self.address_of("postgres").ok_or_else(|| {
+            let url = self.postgres_url(postgres).ok_or_else(|| {
                 crate::error::Error::Internal(
                     "a postgres topology was applied against no running postgres".to_string(),
                 )
             })?;
 
-            topology::apply_migrations(address, postgres).await?;
+            topology::apply_migrations(&url, postgres).await?;
         }
 
         Ok(())
@@ -155,10 +171,21 @@ impl Environment {
             .map(|dependency| dependency.address.as_str())
     }
 
-    /// Environment for a terminal SQL check, if this scenario has a Postgres.
-    pub fn postgres_url(&self, database: &str) -> Option<String> {
-        self.address_of("postgres")
-            .map(|address| format!("postgres://misorder:misorder@{address}/{database}"))
+    /// How to reach the Postgres directly, if this scenario has one.
+    ///
+    /// Straight at the server rather than through the proxy, because the two
+    /// callers are the migration step and the terminal SQL check, and neither
+    /// is part of the run being perturbed. A migration dropped by a fault
+    /// would be the harness breaking its own setup, and a terminal check read
+    /// through a delayed connection would be reporting the fault rather than
+    /// the state the service ended up in.
+    pub fn postgres_url(&self, postgres: &crate::scenario::file::Postgres) -> Option<String> {
+        self.address_of("postgres").map(|address| {
+            format!(
+                "postgres://{}:{}@{address}/{}",
+                postgres.user, postgres.password, postgres.database
+            )
+        })
     }
 
     /// Stops and removes everything that was started.
@@ -167,6 +194,10 @@ impl Environment {
     /// annoyance; a run reported as failed because cleanup was slow is a
     /// false failure, and those are the expensive kind.
     pub async fn stop(self) {
+        let Some(daemon) = self.daemon else {
+            return;
+        };
+
         for dependency in &self.dependencies {
             // Not ours to stop. Killing a Redis somebody's compose file brought
             // up, because a scenario happened to point at it, would be a run
@@ -180,6 +211,8 @@ impl Environment {
                 container = %dependency.container_id,
                 "stopping dependency"
             );
+
+            daemon.remove(&dependency.container_id).await;
         }
     }
 }
@@ -193,6 +226,7 @@ pub fn default_images() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
         ("nats", "nats:2.10-alpine"),
         ("postgres", "postgres:17-alpine"),
+        ("redis", "redis:7-alpine"),
     ])
 }
 
@@ -205,7 +239,11 @@ mod tests {
         let environment = Environment::default();
 
         assert!(environment.address_of("nats").is_none());
-        assert!(environment.postgres_url("misorder").is_none());
+        assert!(
+            environment
+                .postgres_url(&crate::scenario::file::Postgres::default())
+                .is_none()
+        );
     }
 
     #[test]
@@ -216,10 +254,16 @@ mod tests {
                 address: "127.0.0.1:54321".to_string(),
                 container_id: "abc".to_string(),
             }],
+            daemon: None,
+        };
+
+        let postgres = crate::scenario::file::Postgres {
+            database: "ledger".to_string(),
+            ..crate::scenario::file::Postgres::default()
         };
 
         assert_eq!(
-            environment.postgres_url("ledger").as_deref(),
+            environment.postgres_url(&postgres).as_deref(),
             Some("postgres://misorder:misorder@127.0.0.1:54321/ledger")
         );
     }

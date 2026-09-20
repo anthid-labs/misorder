@@ -182,6 +182,8 @@ pub struct Signals {
     pub connected: bool,
     /// A NATS `SUB` crossed a proxy.
     pub subscribed: bool,
+    /// A Postgres startup message was answered by the server.
+    pub postgres_ready: bool,
 }
 
 /// Shared between every proxy and the run loop.
@@ -228,6 +230,22 @@ impl Readiness {
         });
     }
 
+    /// A Postgres session reached `ReadyForQuery`.
+    ///
+    /// Implies a connection, for the same reason a subscription does: one had
+    /// to be accepted to carry it. Stronger than `first_connection` on purpose,
+    /// because a postmaster still running its own startup accepts TCP and then
+    /// refuses the session, and a workload driven at that point measures the
+    /// harness rather than the service.
+    pub fn postgres_connected(&self) {
+        self.sender.send_if_modified(|signals| {
+            let changed = !signals.postgres_ready || !signals.connected;
+            signals.postgres_ready = true;
+            signals.connected = true;
+            changed
+        });
+    }
+
     pub fn signals(&self) -> Signals {
         *self.sender.borrow()
     }
@@ -253,15 +271,8 @@ impl Readiness {
                 Ready::NatsSubscriptionActive => {
                     receiver.wait_for(|signals| signals.subscribed).await
                 }
-                // No adapter reports it, because the Postgres codec is not
-                // written. Named rather than left to time out, so the reader is
-                // sent to the gap instead of to their own service.
                 Ready::PostgresConnected => {
-                    return Err(crate::error::Error::Unsupported(
-                        "`ready_when = \"postgres_connected\"` needs the Postgres adapter, and \
-                         its wire codec is not written yet"
-                            .to_string(),
-                    ));
+                    receiver.wait_for(|signals| signals.postgres_ready).await
                 }
                 other => {
                     return Err(crate::error::Error::Internal(format!(

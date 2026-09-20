@@ -4,17 +4,24 @@
 // feature set that leaves the adapter out - which is the set an embedder
 // taking one protocol uses.
 #![cfg(feature = "nats")]
-//! The NATS loop, against a real server.
+//! The NATS loop, against a real server in a real container.
 //!
-//! Skipped unless `MISORDER_TEST_NATS_URL` names one. Deliberately not
-//! `NATS_URL`: on a developer machine that variable is very often a tunnel to a
-//! production cluster, and a test suite that read the obvious name would create
-//! streams there the first time somebody ran it without thinking about it.
+//! Every test here is `#[ignore]`, so `cargo test --workspace` stays hermetic.
 //!
 //! ```bash
-//! docker run -d --rm -p 14222:4222 nats:2.10-alpine -js
-//! MISORDER_TEST_NATS_URL=127.0.0.1:14222 cargo test -p misorder --test nats_live
+//! cargo test -p misorder --test nats_live -- --ignored
 //! ```
+//!
+//! Each test starts its own NATS and removes it afterwards, which is also what
+//! proves the orchestrator starts one correctly: JetStream is off by default in
+//! that image, so a container started without `-js` comes up perfectly and
+//! fails at the first stream.
+//!
+//! `MISORDER_TEST_NATS_URL` points the suite at a server you already have
+//! instead. Deliberately not `NATS_URL`: on a developer machine that variable
+//! is very often a tunnel to a production cluster, and a test suite that read
+//! the obvious name would create streams there the first time somebody ran it
+//! without thinking about it.
 //!
 //! What this proves that the unit tests cannot: a real `async-nats` client,
 //! speaking real JetStream, reaches a real server through the adapter and does
@@ -33,11 +40,52 @@ use misorder::schedule::{DecisionSource, Scheduler};
 use misorder::trace::{Decision, DecisionPoint, PointKind, Recorder};
 use tokio_util::sync::CancellationToken;
 
-/// The server to test against, or `None` to skip.
-fn upstream() -> Option<String> {
-    std::env::var("MISORDER_TEST_NATS_URL")
-        .ok()
-        .filter(|url| !url.trim().is_empty())
+/// A NATS to test against, started here unless one was named.
+struct Server {
+    address: String,
+    /// `None` when the server is somebody else's, which is also what says
+    /// there is nothing here to tear down.
+    started: Option<misorder::orchestrator::Environment>,
+}
+
+impl Server {
+    async fn start() -> Self {
+        if let Some(address) = std::env::var("MISORDER_TEST_NATS_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+        {
+            return Self {
+                address,
+                started: None,
+            };
+        }
+
+        let deps = misorder::scenario::file::Deps {
+            nats: Some(misorder::scenario::file::Nats::default()),
+            ..Default::default()
+        };
+
+        let environment = misorder::orchestrator::Environment::start(
+            &deps,
+            &misorder::scenario::file::RunSettings::default(),
+        )
+        .await
+        .expect("a nats container starts");
+
+        Self {
+            address: environment
+                .address_of("nats")
+                .expect("a started container has an address")
+                .to_string(),
+            started: Some(environment),
+        }
+    }
+
+    async fn stop(self) {
+        if let Some(environment) = self.started {
+            environment.stop().await;
+        }
+    }
 }
 
 /// Answers one chosen fork and stays neutral everywhere else.
@@ -148,11 +196,10 @@ impl Live {
 /// across the proxy. Every one of those steps is a place a wrong codec would
 /// stop the client dead rather than merely produce a wrong event.
 #[tokio::test]
+#[ignore = "starts a real NATS container; run with --ignored"]
 async fn a_real_client_reaches_jetstream_through_the_adapter() {
-    let Some(upstream) = upstream() else {
-        eprintln!("skipped: set MISORDER_TEST_NATS_URL to run this");
-        return;
-    };
+    let server = Server::start().await;
+    let upstream = server.address.clone();
 
     reset(&upstream, "MISORDER_LIVE_OK").await;
 
@@ -245,6 +292,7 @@ async fn a_real_client_reaches_jetstream_through_the_adapter() {
     );
 
     live.stop().await;
+    server.stop().await;
 }
 
 /// A swallowed ack produces the server's own redelivery.
@@ -253,11 +301,10 @@ async fn a_real_client_reaches_jetstream_through_the_adapter() {
 /// redelivery, and `num_delivered` is the real server's count. A harness that
 /// invented either would be checking its own bookkeeping.
 #[tokio::test]
+#[ignore = "starts a real NATS container; run with --ignored"]
 async fn a_swallowed_ack_makes_the_server_redeliver() {
-    let Some(upstream) = upstream() else {
-        eprintln!("skipped: set MISORDER_TEST_NATS_URL to run this");
-        return;
-    };
+    let server = Server::start().await;
+    let upstream = server.address.clone();
 
     reset(&upstream, "MISORDER_LIVE_REDELIVER").await;
 
@@ -327,9 +374,37 @@ async fn a_swallowed_ack_makes_the_server_redeliver() {
 
     live.stop().await;
 
+    server.stop().await;
+
     assert_eq!(
         counts,
         vec![1, 2],
         "the swallowed ack has to produce the server's own second delivery, not a forged one"
     );
+}
+
+/// The claim the orchestrator makes about this image, on its own.
+///
+/// JetStream is off unless the container is started with `-js`, and without it
+/// the server comes up, answers, passes its readiness probe, and then fails the
+/// first stream a scenario declares. That failure reads as a broken scenario
+/// rather than as a missing flag.
+#[tokio::test]
+#[ignore = "starts a real NATS container; run with --ignored"]
+async fn a_started_container_has_jetstream_turned_on() {
+    let server = Server::start().await;
+
+    let declared = stream("MISORDER_LIVE_JS");
+    let (events, mut configured) = EventSink::new();
+
+    apply_stream(&server.address, &declared, &events, Duration::ZERO)
+        .await
+        .expect("a stream needs JetStream, which needs the flag");
+
+    assert!(
+        configured.try_recv().is_ok(),
+        "the server answered with a consumer configuration"
+    );
+
+    server.stop().await;
 }

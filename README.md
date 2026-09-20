@@ -13,16 +13,21 @@ that caused it.
 [![Docs.rs](https://docs.rs/misorder/badge.svg)](https://docs.rs/misorder)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Status: the loop closes for HTTP, Redis and NATS. Postgres does not yet.**
+**Status: the loop closes for HTTP, Redis, NATS and Postgres.**
 `mis run` starts your service, puts a proxy between it and everything it talks
 to, drives the workload through that, checks the invariants and hands back a
-shrunk reproducer, with no Docker involved, in either direction:
+shrunk reproducer, in either direction:
 
 - **Ingress**, where the vendor calls you. A webhook endpoint, with the workload
   driver standing in for Stripe.
-- **Egress**, where you call the dependency. Your service reaches Redis or NATS
-  through the proxy by reading a different value out of `REDIS_URL` or
-  `NATS_URL`.
+- **Egress**, where you call the dependency. Your service reaches Redis, NATS or
+  Postgres through the proxy by reading a different value out of `REDIS_URL`,
+  `NATS_URL` or `DATABASE_URL`.
+
+A dependency can be one you already have or one misorder starts: declare an
+`address` and it proxies what is there, leave it out and it pulls a pinned
+image, publishes it on loopback, applies your migrations, and removes it when
+the run ends. A scenario with no dependencies needs no daemon at all.
 
 What that finds, on the example in this repository: **400 orderings of five
 Stripe webhooks in 11.3 seconds**, twelve of them failing, grouped into **one**
@@ -123,9 +128,8 @@ actually resolves to and marks the ones that are specified but not yet
 implemented, so you find out how much of your scenario is real before spending
 an hour of compute on it.
 
-[`misorder.example.toml`](misorder.example.toml) documents every key, including
-the Postgres block whose adapter is still being built. The full reference is in
-[The scenario file](#the-scenario-file).
+[`misorder.example.toml`](misorder.example.toml) documents every key. The full
+reference is in [The scenario file](#the-scenario-file).
 
 ## Worked examples
 
@@ -634,8 +638,10 @@ chases it for an hour, and the next real finding gets the same treatment.
 | An invariant is violated | Reported as a finding, with the decisions that caused it, shrunk if asked | 2 |
 | The scenario is malformed or self-contradictory | Startup failure naming what is wrong | 1 |
 | The scenario is valid but asks for something unbuilt | `not supported yet`, naming the feature. Distinct from a bad scenario: the file is not wrong, the feature is missing | 1 |
-| A Postgres dependency is declared | `not supported yet`. The codec is unwritten; the seam and the fault vocabulary are not | 1 |
-| A scenario asks misorder to start a container | `not supported yet`. Declare an already-running dependency by `address` instead | 1 |
+| A scenario asks misorder to start a container | Pulled if the daemon does not have it, published on loopback, waited for in its own protocol, and removed when the run ends | 0/2 |
+| A container starts but the server never answers | Removed again, and the run fails naming the last refusal rather than only the timeout | 1 |
+| A Postgres client sends `LISTEN`, `COPY`, or pipelines with `Flush` | Refused, naming which. Each breaks the one-answer-per-statement pairing the adapter and its invariants rest on | 1 |
+| A Postgres client asks for TLS | Answered `N`, and the client falls back to plaintext. A proxy watching an encrypted stream can make none of the decisions this tool exists to make | 0/2 |
 | The Docker daemon is unreachable | `the Docker daemon did not answer`, naming the underlying error. A scenario declaring no dependencies, or only ones by `address`, never reaches this | 1 |
 | The service under test needs a port and has no `listen_env` | Startup failure telling you to add one, rather than binding something arbitrary | 1 |
 | The service does not become ready inside `ready_timeout` | Timed out, naming what was waited for and how long | 1 |
@@ -745,6 +751,7 @@ local build for development.
 | `crates/misorder`       | The library: scenario, orchestrator, proxy, schedule, trace, invariants, shrinker. |
 | `apps/misorder-cli`     | The `mis` binary: argument parsing, logging setup, exit codes. |
 | `apps/demos`            | The services under test: `billing_demo` for the ingress example, `redis_demo` and `nats_demo` for the egress ones. All wrong on purpose. |
+| `crates/misorder/tests` | The live suites, one per adapter. `#[ignore]`, and each starts its own container. |
 | `examples/`             | Scenario files, including the ones in this README, and a corpus. |
 | `docker/`               | Dockerfile and a compose example.                              |
 | `docs/ARCHITECTURE.md`  | How the components fit, with a flowchart for each.             |
@@ -778,6 +785,29 @@ which is the property the whole tool rests on. The adapters bind loopback
 sockets and talk to a few dozen lines of fake server, which is enough to test
 what they decide.
 
+It is not enough to test what they understood. A fake that answers `+OK` to
+everything still answers a command this adapter re-framed wrongly, so each
+adapter also has a live suite that starts a real container, drives a real
+client through the proxy, and removes the container afterwards:
+
+```bash
+cargo test -p misorder --test postgres_live -- --ignored
+cargo test -p misorder --test redis_live    -- --ignored
+cargo test -p misorder --test nats_live     -- --ignored
+```
+
+Those are `#[ignore]` rather than a skip they decide for themselves, because a
+skipped test still reports `ok`, and a suite that said it passed for having run
+nothing is how a gap survives a green CI. `MISORDER_TEST_POSTGRES_URL`,
+`MISORDER_TEST_REDIS_URL` and `MISORDER_TEST_NATS_URL` point them at a server
+you already have instead of starting one.
+
+What the live suites prove that the fakes cannot is the part nobody can argue
+with: a real `tokio-postgres` client speaking the real extended query protocol,
+a real `40001` from a real serializable conflict, and the command tag `ROLLBACK`
+that Postgres really does answer a doomed `COMMIT` with, which is the entire
+premise of `no_commit_after_error`.
+
 One more thing CI checks, and it is the one that fails for somebody else rather
 than for you:
 
@@ -803,10 +833,10 @@ after you have pushed.
 ## Roadmap
 
 **Phase 1, the loop.** One service, real dependencies, seeded faults, a failure
-that reproduces, a minimal reproducer. The loop is closed for HTTP, Redis and
-NATS, in both placements, against a service that imports nothing. What is left
-is protocol coverage — the Postgres codec — and starting the containers a
-scenario declares rather than pointing at ones you already started.
+that reproduces, a minimal reproducer. The loop is closed for HTTP, Redis, NATS
+and Postgres, in both placements, against a service that imports nothing, and a
+scenario can either point at a dependency you already run or have misorder
+start one. What is left is protocol coverage.
 
 The next adapter is worth naming. **gRPC is the one that pays twice**: it needs
 HTTP/2, and HTTP/2 is also what makes `reorder` work properly for the HTTP
@@ -841,21 +871,35 @@ real container and failing on disagreement.
 
 ## Not done
 
-- **The Postgres wire codec.** The seam is defined and the fault vocabulary is
-  complete; the codec is not written. The other three are: `proxy::http` speaks
-  HTTP/1.1, `proxy::redis` speaks RESP, `proxy::nats` speaks the NATS line
-  protocol, and all three ask at every fork.
+- **A hold names a fork on its own connection, not another one.**
+  `Decision::Hold { until }` is carried out: the statement waits for the fork it
+  names and goes out after that one has been answered. What it cannot say is
+  "until connection 2 commits", because a decision has no way to name another
+  connection, and the cross-connection interleaving is the Postgres case worth
+  commanding. Two serializable transactions still conflict for real under a
+  seeded `delay`; what is missing is being able to ask for it exactly. Widening
+  it is a change to the trace format, which every committed reproducer is read
+  by.
+- **Postgres `LISTEN`/`NOTIFY`, `COPY`, and `Flush` pipelining.** All three
+  refused with a clear message rather than forwarded and quietly mis-paired. A
+  notification arrives with no statement asking for it, which is the one part of
+  Postgres that fails the "does anything happen without a client asking?" test;
+  a copy switches the connection into a stream with no statement boundaries; and
+  libpq's pipeline mode ends a statement with `Flush`, which asks for output
+  without ending the group, so there is no boundary to fork at.
+- **`no_query_outside_transaction` and `set_local_role_survives_pooler`.** Both
+  need the pooler-visible session identity, which the adapter does not surface
+  yet. Marked `planned` rather than left reading as working.
+- **A Postgres worked example.** The adapter has a live suite against a real
+  container, and the three worked examples in this repository are still HTTP,
+  Redis and NATS. What is missing is a demo service with the bug in it, which is
+  documentation rather than engine.
 - **Replay divergence is tracked but not reported.** `Replay` records the forks
   a run reached that the trace has nothing for, and the decisions the trace held
   that the run never reached, and answers `is_faithful()`. Nothing outside its
   own tests reads any of that, so `mis replay` cannot yet tell you that a
   committed reproducer stopped reproducing the schedule it recorded — which is
   the one thing a reproducer is for.
-- **Container orchestration.** `orchestrator::docker` connects to the daemon and
-  reports a clear error; it does not start anything. A scenario that declares no
-  dependencies never reaches it, and one that declares an already-running
-  dependency by `address` does not either, which is why all three worked
-  examples run with no daemon.
 - **JetStream `ack_wait` on demand.** `ack_timeout` holds an ack for a fixed
   span and the server's expiry fires on its own wall clock, so the duplicate
   processing race is explored rather than commanded. Nothing crosses the wire
@@ -881,11 +925,12 @@ real container and failing on disagreement.
   for, which breaks the one-reply-per-command pairing the adapter and its
   invariants rest on. Refused with a clear message rather than forwarded and
   quietly mis-paired.
-- **TLS, and HTTP/2.** Both adapters are plaintext. The service under test is on
-  loopback and a vendor's delivery has already been terminated by the time
-  misorder sees it, so neither is in the way yet. HTTP/2 is what would make
-  `reorder` useful against a real HTTP client, which today needs pipelining that
-  almost nobody does.
+- **TLS, and HTTP/2.** Every adapter is plaintext, and Postgres answers an
+  `SSLRequest` with `N` rather than forwarding it, so a client configured to
+  prefer TLS falls back. The service under test is on loopback and a vendor's
+  delivery has already been terminated by the time misorder sees it, so neither
+  is in the way yet. HTTP/2 is what would make `reorder` useful against a real
+  HTTP client, which today needs pipelining that almost nobody does.
 - **Quiescence detection.** An idle window, which is a heuristic. Deliberately a
   conservative one: calling quiescence during a 40ms CPU burst would manufacture
   a failure that never happened. It is what gates the virtual clock.

@@ -209,26 +209,104 @@ async fn jetstream_update(
     Ok(())
 }
 
-/// Applies `.sql` files in filename order.
+/// Which `.sql` files a migrations directory holds, in the order to apply them.
 ///
 /// Filename order, stated rather than left to the filesystem: `readdir` returns
 /// entries in whatever order the filesystem feels like, and a migration set
 /// that applied in a different order on CI than on a laptop would produce a
 /// difference nobody would think to look for.
+///
+/// Its own function because the ordering is the part that can be quietly wrong,
+/// and this way it is testable without a server.
+pub fn migrations(directory: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+    let entries = std::fs::read_dir(directory).map_err(|error| {
+        Error::Scenario(format!(
+            "migrations directory `{}`: {error}",
+            directory.display()
+        ))
+    })?;
+
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "sql"))
+        .collect();
+
+    files.sort();
+
+    // A directory that was named and holds nothing is a path that is wrong,
+    // and the run that follows would come up against an empty schema and
+    // report the service as broken.
+    if files.is_empty() {
+        return Err(Error::Scenario(format!(
+            "migrations directory `{}` holds no `.sql` files",
+            directory.display()
+        )));
+    }
+
+    Ok(files)
+}
+
+/// Applies `.sql` files in filename order.
+///
+/// Straight at the server, never through a proxy. Migrations run before the
+/// service starts, so there is nothing for a fault to perturb, and a statement
+/// dropped here would be the harness breaking its own setup and then reporting
+/// the service for it.
+#[cfg(feature = "postgres")]
 pub async fn apply_migrations(url: &str, postgres: &Postgres) -> Result<()> {
     let Some(directory) = &postgres.migrations else {
         return Ok(());
     };
 
-    tracing::debug!(
-        url,
-        directory = %directory.display(),
-        "would apply migrations in filename order"
-    );
+    let files = migrations(directory)?;
 
-    Err(Error::Unsupported(
-        "applying migrations is not implemented yet".to_string(),
-    ))
+    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+        .await
+        .map_err(|error| {
+            Error::Environment(format!("postgres did not accept a connection: {error}"))
+        })?;
+
+    // The connection half drives the socket and ends when the client is
+    // dropped. Not detached without a lifecycle: it owns nothing the run needs
+    // afterwards, and its error is the one the statements below report anyway.
+    let driving = tokio::spawn(connection);
+
+    for file in files {
+        let sql = std::fs::read_to_string(&file)
+            .map_err(|error| Error::Scenario(format!("migration `{}`: {error}", file.display())))?;
+
+        // One batch per file, so a file is applied or it is not. Splitting on
+        // semicolons here would be writing a SQL parser to solve a problem the
+        // server does not have.
+        client.batch_execute(&sql).await.map_err(|error| {
+            Error::Environment(format!("migration `{}` failed: {error}", file.display()))
+        })?;
+
+        tracing::debug!(migration = %file.display(), "applied");
+    }
+
+    drop(client);
+    let _ = driving.await;
+
+    Ok(())
+}
+
+/// The answer a build without the `postgres` feature gives a scenario that
+/// declares migrations.
+///
+/// Named and shaped exactly like the real one, so the caller has no branch.
+#[cfg(not(feature = "postgres"))]
+pub async fn apply_migrations(_url: &str, postgres: &Postgres) -> Result<()> {
+    let Some(directory) = &postgres.migrations else {
+        return Ok(());
+    };
+
+    Err(Error::Unsupported(format!(
+        "the scenario applies the migrations in `{}`, and this build of misorder has no postgres \
+         adapter in it. Rebuild with the `postgres` feature.",
+        directory.display()
+    )))
 }
 
 #[cfg(test)]

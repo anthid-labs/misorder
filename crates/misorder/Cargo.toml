@@ -78,7 +78,8 @@ tokio-postgres = { workspace = true, optional = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
-# The live NATS test drives a real client through the adapter, which needs the
-# client library unconditionally rather than behind the `nats` feature: a build
-# with the feature off still compiles its tests.
+# The live tests drive real clients through the adapters, which needs the
+# client libraries unconditionally rather than behind their features: a build
+# with a feature off still compiles its tests.
 async-nats = { workspace = true }
+tokio-postgres = { workspace = true }

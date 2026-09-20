@@ -260,6 +260,12 @@ impl Deps {
             found.push(("nats", address.as_str()));
         }
 
+        if let Some(postgres) = &self.postgres
+            && let Some(address) = &postgres.address
+        {
+            found.push(("postgres", address.as_str()));
+        }
+
         if let Some(redis) = &self.redis
             && let Some(address) = &redis.address
         {
@@ -363,9 +369,29 @@ pub enum Discard {
     New,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Postgres {
+    /// `host:port` of a Postgres that is already running.
+    ///
+    /// Left out, misorder starts a container and owns the credentials. Set,
+    /// misorder starts nothing and puts a proxy in front of what is already
+    /// there, which is how most people already run their integration tests.
+    ///
+    /// The service under test never sees this address. It gets the proxy's,
+    /// through `PGHOST`, `PGPORT` and `DATABASE_URL`. A server somebody else
+    /// started has credentials misorder does not know, so those are left for
+    /// the scenario's own `env` to carry and only the address is injected.
+    ///
+    /// # A sweep against one of these is not isolated
+    ///
+    /// misorder did not start it, so it is not reset between seeds. Whatever
+    /// seed 40 wrote is still there for seed 41, and a run's outcome can then
+    /// depend on a run before it, which is exactly the property `mis fuzz`
+    /// exists to rule out. A single `mis run` is unaffected.
+    #[serde(default)]
+    pub address: Option<String>,
+
     #[serde(default)]
     pub image: Option<String>,
 
@@ -376,10 +402,47 @@ pub struct Postgres {
 
     #[serde(default = "default_database")]
     pub database: String,
+
+    /// The role misorder connects as, and creates the server with.
+    ///
+    /// Two jobs, and they are the same value on purpose: misorder builds the
+    /// `DATABASE_URL` the service reads, applies the migrations, and runs the
+    /// terminal SQL check, so all three need one answer to "who am I". A
+    /// server somebody else started is reached with whatever is written here,
+    /// which is the only way misorder can reach one at all: it has no other
+    /// source for a credential and will not guess at one.
+    #[serde(default = "default_user")]
+    pub user: String,
+
+    #[serde(default = "default_user")]
+    pub password: String,
 }
 
 fn default_database() -> String {
     "misorder".to_string()
+}
+
+fn default_user() -> String {
+    "misorder".to_string()
+}
+
+/// Written out rather than derived, so the two ways of getting a `Postgres`
+/// agree.
+///
+/// A derived `Default` gives empty strings while serde gives `misorder`, and
+/// the difference would show up as a run connecting as nobody, in a build that
+/// had passed every test that constructed the struct in Rust.
+impl Default for Postgres {
+    fn default() -> Self {
+        Self {
+            address: None,
+            image: None,
+            migrations: None,
+            database: default_database(),
+            user: default_user(),
+            password: default_user(),
+        }
+    }
 }
 
 /// Redis, reached through the proxy.
